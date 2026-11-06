@@ -39,7 +39,7 @@ TASK_STATUSES = (
     "cancelled",
 )
 OPEN_RUN_STATUSES = ("queued", "running")
-NOTE_KINDS = ("decision", "context", "handoff", "progress", "question", "review", "risk")
+NOTE_KINDS = ("decision", "context", "handoff", "progress", "question", "review", "risk", "feedback")
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -115,8 +115,10 @@ TASK_KINDS = ("code", "asset", "doc", "research", "design", "qa")
 
 # Columns added after the first release; created on open for older brains.
 _MIGRATIONS = {
-    "tasks": [("kind", "TEXT NOT NULL DEFAULT 'code'"), ("role", "TEXT NOT NULL DEFAULT ''")],
-    "runs": [("files", "TEXT NOT NULL DEFAULT '{}'"), ("delegations", "TEXT NOT NULL DEFAULT '[]'")],
+    "tasks": [("kind", "TEXT NOT NULL DEFAULT 'code'"), ("role", "TEXT NOT NULL DEFAULT ''"),
+              ("model", "TEXT NOT NULL DEFAULT ''"), ("effort", "TEXT NOT NULL DEFAULT ''")],
+    "runs": [("files", "TEXT NOT NULL DEFAULT '{}'"), ("delegations", "TEXT NOT NULL DEFAULT '[]'"),
+             ("model", "TEXT NOT NULL DEFAULT ''"), ("effort", "TEXT NOT NULL DEFAULT ''")],
 }
 
 
@@ -251,16 +253,16 @@ class Brain:
 
     # -- tasks -------------------------------------------------------------------
 
-    def add_task(self, *, title: str, detail: str, agent: str, depends_on: list[int], actor: str, kind: str = "code", role: str = "") -> dict:
+    def add_task(self, *, title: str, detail: str, agent: str, depends_on: list[int], actor: str, kind: str = "code", role: str = "", model: str = "", effort: str = "") -> dict:
         now = time.time()
         with self._tx() as db:
             for dep in depends_on:
                 if db.execute("SELECT 1 FROM tasks WHERE id=?", (dep,)).fetchone() is None:
                     raise BrainError(f"Dependency {tid(dep)} does not exist")
             cur = db.execute(
-                "INSERT INTO tasks(title, detail, agent, depends_on, created_by, created_at, updated_at, kind, role)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (title, detail, agent, json.dumps(depends_on), actor, now, now, kind if kind in TASK_KINDS else "code", role),
+                "INSERT INTO tasks(title, detail, agent, depends_on, created_by, created_at, updated_at, kind, role, model, effort)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (title, detail, agent, json.dumps(depends_on), actor, now, now, kind if kind in TASK_KINDS else "code", role, model, effort),
             )
             task_id = int(cur.lastrowid)
         self.event(actor, "task_added", f"{tid(task_id)} {title} -> {agent or 'unassigned'}", task_id=task_id)

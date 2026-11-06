@@ -42,6 +42,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "max_concurrent_runs": 3,
     "attach_mcp": True,
     "resume_sessions": True,
+    "resume_max_tokens": 600_000,
     "max_review_rounds": 3,
     "remove_worktree_on_merge": True,
     "env_passthrough": [],
@@ -171,11 +172,13 @@ class Thoth:
                     actor=self.actor,
                     kind=kind,
                     role=str(spec.get("role") or "").strip()[:60],
+                    model=str(spec.get("model") or "").strip()[:60],
+                    effort=str(spec.get("effort") or "").strip().lower()[:10],
                 )
             )
         return {"created": [self._task_brief(t) for t in created], "board": board_lines(brain)}
 
-    def update_task(self, project_dir: str, task: Any, *, title: str = "", detail: str = "", agent: str = "", status: str = "", kind: str = "", role: str = "") -> dict:
+    def update_task(self, project_dir: str, task: Any, *, title: str = "", detail: str = "", agent: str = "", status: str = "", kind: str = "", role: str = "", model: str | None = None, effort: str | None = None) -> dict:
         brain = self.open(project_dir)
         task_id = parse_id(task, "T")
         current = brain.task(task_id)
@@ -194,6 +197,10 @@ class Thoth:
             fields["kind"] = kind
         if role:
             fields["role"] = role.strip()[:60]
+        if model is not None:
+            fields["model"] = model.strip()[:60]  # "" = back to the default
+        if effort is not None:
+            fields["effort"] = effort.strip().lower()[:10]
         if status:
             if status not in ("todo", "cancelled"):
                 raise BrainError("Only 'todo' (reopen) or 'cancelled' can be set by hand")
@@ -206,7 +213,7 @@ class Thoth:
 
     # -- runs --------------------------------------------------------------------
 
-    def assign(self, project_dir: str, task: Any, agent: str = "", instructions: str = "") -> dict:
+    def assign(self, project_dir: str, task: Any, agent: str = "", instructions: str = "", model: str = "", effort: str = "") -> dict:
         brain = self.open(project_dir)
         task_id = parse_id(task, "T")
         current = brain.task(task_id)
@@ -223,13 +230,24 @@ class Thoth:
         self._check_capacity(brain)
         current = self._prepare_worktree(brain, current)
         session = brain.last_session(task_id, agent) if self.settings.get("resume_sessions") else ""
+        if session:
+            # Resuming re-sends the whole earlier session on every call. When that session is already
+            # large, a fresh run with the brief (which carries the summary, feedback and review notes) is cheaper.
+            last = next((r for r in brain.runs(task_id=task_id, limit=20) if r["agent"] == agent and r["kind"] == "build" and r["session_id"] == session), None)
+            limit = int(self.settings.get("resume_max_tokens") or 0)
+            if last is not None and limit and self._usage(last)["prompt"] > limit:
+                session = ""
         has_mcp = bool(self.settings.get("attach_mcp")) and self.mcp_launcher is not None
         prompt = build_brief(brain, current, agent=agent, instructions=instructions, has_mcp=has_mcp, resumed=bool(session))
         run = brain.add_run(task_id=task_id, agent=agent, kind="build", prompt=prompt, actor=self.actor)
+        use_model = model or (current["model"] if agent == (current["agent"] or agent) else "")
+        use_effort = effort or (current["effort"] if agent == (current["agent"] or agent) else "")
+        brain.update_run(run["id"], model=use_model or self.settings.get(f"{agent}_model") or "", effort=use_effort)
         brain.update_task(task_id, status="running", agent=agent)
         brain.event(self.actor, "run_started", f"{agent} builds {current['ref']} {current['title']}" + (" (resumed session)" if session else ""), task_id=task_id, run_id=run["id"])
-        self._launch(brain, run["id"], current, driver, kind="build", prompt=prompt, session=session, cwd=Path(current["worktree"]))
-        return {"run": run["ref"], "task": current["ref"], "agent": agent, "branch": current["branch"], "resumed_session": bool(session), "status": "running"}
+        self._launch(brain, run["id"], current, driver, kind="build", prompt=prompt, session=session, cwd=Path(current["worktree"]), model=use_model, effort=use_effort)
+        return {"run": run["ref"], "task": current["ref"], "agent": agent, "branch": current["branch"], "resumed_session": bool(session), "status": "running",
+                "model": use_model or "default", "effort": use_effort or "default"}
 
     def _assign_to_coordinator(self, brain: Brain, task: dict, instructions: str) -> dict:
         """Hermes (or whoever coordinates) does this task itself, in the task worktree, then calls complete()."""
@@ -258,7 +276,7 @@ class Thoth:
         final = brain.run(run["id"])
         return self._run_brief(final, brain.task(current["id"]))
 
-    def review(self, project_dir: str, task: Any, reviewer: str = "", instructions: str = "") -> dict:
+    def review(self, project_dir: str, task: Any, reviewer: str = "", instructions: str = "", model: str = "", effort: str = "") -> dict:
         brain = self.open(project_dir)
         task_id = parse_id(task, "T")
         current = brain.task(task_id)
@@ -281,9 +299,10 @@ class Thoth:
         if instructions.strip():
             prompt += f"\n\nCoordinator's instructions for this review:\n{instructions.strip()}"
         run = brain.add_run(task_id=task_id, agent=reviewer, kind="review", prompt=prompt, actor=self.actor)
+        brain.update_run(run["id"], model=model or self.settings.get(f"{reviewer}_model") or "", effort=effort)
         brain.update_task(task_id, status="reviewing")
         brain.event(self.actor, "review_started", f"{reviewer} reviews {current['agent']}'s {current['ref']}", task_id=task_id, run_id=run["id"])
-        self._launch(brain, run["id"], current, driver, kind="review", prompt=prompt, session="", cwd=worktree)
+        self._launch(brain, run["id"], current, driver, kind="review", prompt=prompt, session="", cwd=worktree, model=model, effort=effort)
         return {"run": run["ref"], "task": current["ref"], "reviewer": reviewer, "author": current["agent"], "status": "running"}
 
     def _driver(self, agent: str):
@@ -325,14 +344,15 @@ class Thoth:
         base_commit = gitops.create_worktree(brain.root, worktree, branch, base_ref)
         return brain.update_task(task["id"], branch=branch, worktree=str(worktree), base_ref=base_ref, base_commit=base_commit, head_commit=base_commit)
 
-    def _launch(self, brain: Brain, run_id: int, task: dict, driver, *, kind: str, prompt: str, session: str, cwd: Path) -> None:
+    def _launch(self, brain: Brain, run_id: int, task: dict, driver, *, kind: str, prompt: str, session: str, cwd: Path, model: str = "", effort: str = "") -> None:
         mcp = None
         if self.settings.get("attach_mcp") and self.mcp_launcher is not None:
             try:
                 mcp = self.mcp_launcher(brain.root, driver.name, run_id, task["id"])
             except Exception:
                 logger.warning("thoth: could not prepare the MCP server for R%s", run_id, exc_info=True)
-        cmd = driver.command(kind=kind, session_id=session, mcp=mcp)
+        title = f"Thoth · {task['ref']} {'review' if kind == 'review' else task['title']}"
+        cmd = driver.command(kind=kind, session_id=session, mcp=mcp, model=model, effort=effort, name=title)
         log_path = brain.runs_dir / f"R{run_id}.jsonl"
         brain.update_run(run_id, log_path=str(log_path), commit_before=gitops.head(cwd))
 
@@ -526,6 +546,89 @@ class Thoth:
 
     # -- versions ----------------------------------------------------------------
 
+    # -- iterate on a task ------------------------------------------------------
+
+    def revise(self, project_dir: str, task: Any, feedback: str, agent: str = "", files: list[str] | None = None, model: str = "", effort: str = "") -> dict:
+        """Send a task back with the user's feedback. The same agent resumes its session; the feedback
+        stays on the task so later runs and reviewers see it too."""
+        brain = self.open(project_dir)
+        current = brain.task(parse_id(task, "T"))
+        feedback = (feedback or "").strip()
+        if not feedback:
+            raise BrainError("Say what should change")
+        if current["status"] == "merged":
+            raise BrainError(f"{current['ref']} is merged; add a follow-up task instead")
+        focus = [str(f) for f in files or [] if str(f).strip()]
+        body = feedback + (("\nFiles to redo: " + ", ".join(focus)) if focus else "")
+        brain.add_note(kind="feedback", author=self.actor if self.actor != "hermes" else "user", body=body, task_id=current["id"])
+        instructions = f"The user reviewed your work and wants changes:\n{feedback}"
+        if focus:
+            instructions += "\nRedo only these files unless the feedback says otherwise: " + ", ".join(focus)
+        instructions += "\nKeep everything else as it is, and say in your report what you changed."
+        result = self.assign(project_dir, current["ref"], agent=agent, instructions=instructions, model=model, effort=effort)
+        brain.update_run(parse_id(result["run"], "R"), started_by="feedback")
+        return result
+
+    def restore(self, project_dir: str, task: Any, commit: str) -> dict:
+        """Bring back an earlier version of a task as a new version (history is kept)."""
+        brain = self.open(project_dir)
+        current = brain.task(parse_id(task, "T"))
+        if current["status"] in ("running", "reviewing", "merged"):
+            raise BrainError(f"{current['ref']} is {current['status']}; it can't be restored now")
+        if not current["worktree"] or not Path(current["worktree"]).exists():
+            raise BrainError(f"{current['ref']} has no worktree")
+        wt = Path(current["worktree"])
+        full = gitops.git(wt, "rev-parse", "--verify", f"{commit}^{{commit}}", check=False)
+        if not full or not gitops.is_ancestor(wt, full, "HEAD"):
+            raise BrainError(f"{commit} is not a version of {current['ref']}")
+        before = gitops.head(wt)
+        tip = gitops.restore_tree(wt, full, f"thoth: restore {current['ref']} to {full[:7]}\n\nThoth-Task: {current['ref']}")
+        if tip is None:
+            return {"task": current["ref"], "restored": full[:7], "changed": False}
+        run = brain.add_run(task_id=current["id"], agent=current["agent"] or "hermes", kind="build", prompt=f"restore {full[:7]}", actor="restore")
+        brain.update_run(run["id"], status="done", summary=f"Restored the version from {full[:7]}", commit_before=before, commit_after=tip,
+                         files={"changed": gitops.name_status(wt, before, tip), "read": [], "outputs": []},
+                         diffstat=gitops.diffstat(wt, before, tip), started_at=time.time(), ended_at=time.time())
+        brain.update_task(current["id"], head_commit=tip, status="built")
+        brain.event(self.actor, "restored", f"{current['ref']} restored to {full[:7]}", task_id=current["id"], run_id=run["id"], commit=tip)
+        return {"task": current["ref"], "restored": full[:7], "commit": tip[:7], "changed": True}
+
+    def stale(self, brain: Brain, task: dict) -> list[dict]:
+        """Dependencies with newer versions than the ones this task was built on."""
+        if not task.get("worktree") or not Path(task["worktree"]).exists() or task["status"] in ("merged", "running", "reviewing"):
+            return []
+        out = []
+        for dep_id in task["depends_on"]:
+            dep = brain.task(dep_id)
+            if dep["head_commit"] and dep["head_commit"] != dep["base_commit"] and not gitops.is_ancestor(Path(task["worktree"]), dep["head_commit"], "HEAD"):
+                out.append(dep)
+        return out
+
+    def sync(self, project_dir: str, task: Any) -> dict:
+        """Pull the newest versions of a task's dependencies into its worktree."""
+        brain = self.open(project_dir)
+        current = brain.task(parse_id(task, "T"))
+        deps = self.stale(brain, current)
+        if not deps:
+            return {"task": current["ref"], "updated": [], "message": "Already up to date with its dependencies"}
+        wt = Path(current["worktree"])
+        if gitops.is_dirty(wt):
+            gitops.commit_all(wt, f"thoth: save {current['ref']} before syncing")
+        before = gitops.head(wt)
+        merged = []
+        for dep in deps:
+            ok, result = gitops.merge_into_worktree(wt, dep["branch"], f"thoth: bring {dep['ref']}'s newest version into {current['ref']}")
+            if not ok:
+                brain.add_note(kind="risk", author="thoth", body=f"Could not bring {dep['ref']}'s new version into {current['ref']}: {result}", task_id=current["id"])
+                raise BrainError(f"{current['ref']} conflicts with {dep['ref']}'s new version ({result}). Ask {current['agent']} to reconcile them.")
+            merged.append(dep["ref"])
+        tip = gitops.head(wt)
+        changed = gitops.name_status(wt, before, tip)
+        brain.update_task(current["id"], head_commit=tip)
+        brain.add_note(kind="handoff", author="thoth", body=f"Updated with the newest {', '.join(merged)}: " + ", ".join(f"{c['status']} {c['path']}" for c in changed[:12]), task_id=current["id"])
+        brain.event(self.actor, "synced", f"{current['ref']} now uses the newest {', '.join(merged)}", task_id=current["id"], commit=tip)
+        return {"task": current["ref"], "updated": merged, "files": [f"{c['status']} {c['path']}" for c in changed[:20]]}
+
     def merge(self, project_dir: str, task: Any, override: bool = False) -> dict:
         brain = self.open(project_dir)
         task_id = parse_id(task, "T")
@@ -642,11 +745,25 @@ class Thoth:
             "brain_file": str(brain.dir / "BRAIN.md"),
         }
 
+    def models(self) -> dict[str, Any]:
+        """What each worker can run on, for pickers: models and reasoning efforts."""
+        out = {}
+        for agent in CLI_WORKERS:
+            drv = driver_for(agent, self.settings)
+            out[agent] = {"models": drv.models() if drv.resolve() else [], "efforts": list(drv.EFFORTS),
+                          "default": str(self.settings.get(f"{agent}_model") or "")}
+        return out
+
     def needs(self, project_dir: str) -> list[dict]:
         """What is waiting on a person (or the coordinator), most urgent first."""
         brain = self.open(project_dir)
         out: list[dict] = []
         for t in brain.tasks():
+            behind = self.stale(brain, t)
+            if behind:
+                names = ", ".join(d["ref"] for d in behind)
+                out.append({"id": f"sync-{t['ref']}", "kind": "sync", "task": t["ref"], "who": behind[0]["agent"] or "hermes", "priority": 1,
+                            "title": f"{t['ref']} uses an older {names}", "detail": f"{names} has a newer version. Bring it in so {_name(t['agent'])} works with it.", "tool": "thoth_sync"})
             runs = brain.runs(task_id=t["id"], limit=10)
             last_review = next((r for r in runs if r["kind"] == "review" and r["status"] == "done"), None)
             reviewer = last_review["agent"] if last_review else _other(t["agent"] or "claude")
@@ -768,6 +885,8 @@ class Thoth:
             "progress": run["progress"],
             "activity": run["activity"],
         }
+        if run.get("model") or run.get("effort"):
+            out["model"] = " · ".join(x for x in (run.get("model"), run.get("effort")) if x)
         files = run.get("files") or {}
         if files.get("changed"):
             out["files_changed"] = [f"{c['status']} {c['path']}" for c in files["changed"][:20]]

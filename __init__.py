@@ -32,7 +32,7 @@ from .thoth_core.service import DEFAULT_SETTINGS, Thoth
 logger = logging.getLogger(__name__)
 
 TOOLSET = "thoth"
-GATED = ("thoth_assign", "thoth_review", "thoth_merge")
+GATED = ("thoth_assign", "thoth_revise", "thoth_review", "thoth_merge")
 TICKET_TTL = 15 * 60
 
 _AGENT_LABEL = {"claude": "Claude Code", "codex": "Codex"}
@@ -148,7 +148,14 @@ class ThothPlugin:
         extra = " ".join(str(args.get("instructions") or "").split())
         if len(extra) > 400:
             extra = extra[:400] + "…"
-        verb = "review" if kind == "review" else "work on"
+        verb = "review" if kind == "review" else ("revise" if name == "thoth_revise" else "work on")
+        if name == "thoth_revise":
+            fb = " ".join(str(args.get("feedback") or "").split())
+            extra = ("User feedback: " + fb[:400]) + (" " + extra if extra else "")
+        model = str(args.get("model") or task.get("model") or svc.settings.get(f"{agent}_model") or "").strip()
+        effort = str(args.get("effort") or task.get("effort") or "").strip()
+        if model or effort:
+            detail += ", model " + (model or "default") + (f", {effort} effort" if effort else "")
         text = (
             f"Thoth: start {_AGENT_LABEL[agent]} ({detail}) to {verb} {task['ref']} \"{task['title']}\" in "
             f"{brain.root}/.thoth/worktrees/{task['ref']} ({note}); timeout {svc.settings['run_timeout_seconds']}s. "
@@ -160,7 +167,7 @@ class ThothPlugin:
 
     def _self_assign(self, name: str, args: dict, svc: Thoth, project: str) -> bool:
         """thoth_assign to hermes starts no process: the coordinator does the work in its own turn."""
-        if name != "thoth_assign":
+        if name not in ("thoth_assign", "thoth_revise"):
             return False
         agent = str(args.get("agent") or "").strip().lower()
         if not agent:
@@ -357,7 +364,7 @@ def doctor_text(settings: dict[str, Any]) -> str:
 
 
 def _fingerprint(name: str, args: dict) -> str:
-    relevant = {k: args.get(k) for k in ("project", "task", "agent", "reviewer", "instructions", "override")}
+    relevant = {k: args.get(k) for k in ("project", "task", "agent", "reviewer", "instructions", "override", "feedback", "files", "model", "effort")}
     blob = json.dumps([name, relevant], sort_keys=True, default=str)
     return hashlib.sha256(blob.encode()).hexdigest()
 

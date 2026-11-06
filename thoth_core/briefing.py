@@ -170,7 +170,7 @@ def build_brief(brain: "Brain", task: dict, *, agent: str, instructions: str = "
     context = brain.notes(project_wide=True, kinds=("context", "risk", "question"), limit=8)
     if context:
         parts.append("## Shared context\n" + "\n".join(_note_line(n) for n in context))
-    task_notes = brain.notes(task_id=task["id"], kinds=("handoff", "review", "question", "context", "risk"), limit=MAX_BRIEF_NOTES)
+    task_notes = brain.notes(task_id=task["id"], kinds=("feedback", "handoff", "review", "question", "context", "risk"), limit=MAX_BRIEF_NOTES)
     if task_notes:
         parts.append("## Notes on this task (handoffs, review comments)\n" + "\n".join(_note_line(n) for n in task_notes))
     dep_lines = []

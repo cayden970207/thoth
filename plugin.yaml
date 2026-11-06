@@ -30,6 +30,10 @@ provides_tools:
   - thoth_update_task
   - thoth_coordinator
   - thoth_complete
+  - thoth_revise
+  - thoth_restore
+  - thoth_sync
+  - thoth_models
 
 provides_hooks:
   - pre_tool_call
@@ -105,6 +109,11 @@ config_schema:
     type: bool
     default: true
     label: Resume the agent's previous session when a task is re-assigned
+  resume_max_tokens:
+    type: int
+    default: 600000
+    label: Start fresh instead of resuming above this many tokens
+    description: Resuming re-sends the agent's whole earlier session on every call. When that session already used more prompt tokens than this, Thoth starts a fresh session with the brief instead.
   remove_worktree_on_merge:
     type: bool
     default: true

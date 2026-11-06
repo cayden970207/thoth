@@ -133,7 +133,7 @@ def test_gated_tools_need_the_hook(repo):
     plugin = _load_plugin()
     ctx = FakeCtx()
     plugin.register(ctx)
-    assert len(ctx.tools) == 13 and "coordinate" in ctx.skills
+    assert len(ctx.tools) == 17 and "coordinate" in ctx.skills
     init = json.loads(ctx.tools["thoth_init"]({"project": str(repo), "goal": "g"}, session_id="s1"))
     assert init["ok"]
     json.loads(ctx.tools["thoth_plan"]({"project": str(repo), "tasks": [{"title": "T", "agent": "codex"}]}, session_id="s1"))
@@ -261,3 +261,68 @@ def test_stream_parsers_capture_files_and_delegations(tmp_path):
     x.parse(json.dumps({"type": "item.completed", "item": {"id": "i2", "type": "collab_tool_call", "tool": "wait", "receiver_thread_ids": ["th1"], "agents_states": {"th1": {"status": "completed"}}}}), st2)
     assert st2.files() == {"read": ["a.py"], "written": ["c.png"]}
     assert st2.delegation_list()[0]["status"] == "completed" and "Slice" in st2.delegation_list()[0]["title"]
+
+
+def test_revise_sync_and_restore_loop(repo):
+    svc = Thoth(mcp_launcher=None)
+    svc.init(str(repo))
+    svc.plan(str(repo), [
+        {"title": "Sprite", "agent": "hermes", "kind": "asset"},
+        {"title": "Game", "agent": "hermes", "kind": "code", "depends_on": [1]},
+    ])
+    wt1 = Path(svc.assign(str(repo), "T1")["worktree"])
+    (wt1 / "hero.txt").write_text("red hair")
+    svc.complete(str(repo), "T1", "v1", outputs=["hero.txt"])
+    first = Brain.open(repo).task(1)["head_commit"]
+    wt2 = Path(svc.assign(str(repo), "T2")["worktree"])
+    assert (wt2 / "hero.txt").read_text() == "red hair"
+    (wt2 / "game.txt").write_text("uses hero")
+    svc.complete(str(repo), "T2", "game v1")
+    # The user is not happy with the sprite: revise it with feedback.
+    started = svc.revise(str(repo), "T1", "Make the hair blue", files=["hero.txt"])
+    assert "Make the hair blue" in started["brief"] and "hero.txt" in started["brief"]
+    (wt1 / "hero.txt").write_text("blue hair")
+    svc.complete(str(repo), "T1", "v2")
+    needs = svc.needs(str(repo))
+    assert needs[0]["kind"] == "sync" and needs[0]["task"] == "T2"
+    synced = svc.sync(str(repo), "T2")
+    assert synced["updated"] == ["T1"] and (wt2 / "hero.txt").read_text() == "blue hair"
+    assert not any(n["kind"] == "sync" for n in svc.needs(str(repo)))
+    # Actually red was better: restore the first version as a new version.
+    restored = svc.restore(str(repo), "T1", first)
+    assert restored["changed"] and (wt1 / "hero.txt").read_text() == "red hair"
+    assert any(n["kind"] == "sync" for n in svc.needs(str(repo)))
+    assert [n["kind"] for n in Brain.open(repo).notes(task_id=1)] .count("feedback") == 1
+
+
+def test_large_sessions_start_fresh(repo, monkeypatch):
+    svc = Thoth(mcp_launcher=None, settings={"resume_max_tokens": 1000})
+    svc.init(str(repo))
+    svc.plan(str(repo), [{"title": "A", "agent": "codex"}])
+    brain = Brain.open(repo)
+    run = brain.add_run(task_id=1, agent="codex", kind="build", prompt="", actor="t")
+    brain.update_run(run["id"], status="done", session_id="sess-1", usage={"prompt_tokens": 5000, "cached_tokens": 4000, "output_tokens": 10})
+    brain.update_task(1, status="built")
+    launched = {}
+    monkeypatch.setattr(svc, "_driver", lambda agent: type("D", (), {"name": agent, "label": agent})())
+    monkeypatch.setattr(svc, "_launch", lambda *a, **k: launched.update(k))
+    out = svc.assign(str(repo), "T1")
+    assert out["resumed_session"] is False and launched["session"] == ""
+    svc2 = Thoth(mcp_launcher=None, settings={"resume_max_tokens": 10_000})
+    brain.update_task(1, status="built")
+    for r in brain.runs(task_id=1, open_only=True):
+        brain.update_run(r["id"], status="done")
+    monkeypatch.setattr(svc2, "_driver", lambda agent: type("D", (), {"name": agent, "label": agent})())
+    monkeypatch.setattr(svc2, "_launch", lambda *a, **k: launched.update(k))
+    assert svc2.assign(str(repo), "T1")["resumed_session"] is True
+
+
+def test_model_and_effort_reach_the_cli():
+    from thoth_core.agents import ClaudeDriver, CodexDriver
+    c = ClaudeDriver({}).command(kind="build", session_id="", mcp=None, model="fable", effort="high", name="Thoth · T1 Build")
+    assert c[c.index("--model") + 1] == "fable" and c[c.index("--effort") + 1] == "high" and c[c.index("--name") + 1] == "Thoth · T1 Build"
+    assert "--effort" not in ClaudeDriver({}).command(kind="build", session_id="", mcp=None, effort="ultra")  # not a Claude level
+    x = CodexDriver({"codex_model": "gpt-6-astra"}).command(kind="build", session_id="", mcp=None, effort="ultra")
+    assert x[x.index("--model") + 1] == "gpt-6-astra" and 'model_reasoning_effort="ultra"' in x
+    y = CodexDriver({"codex_model": "gpt-6-astra"}).command(kind="build", session_id="", mcp=None, model="gpt-6.1-sol")
+    assert y[y.index("--model") + 1] == "gpt-6.1-sol"

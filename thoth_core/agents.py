@@ -160,8 +160,13 @@ class Driver:
             return False, f"{self.label} CLI ('{self.binary}') was not found on PATH; install it or set {self.name}_path"
         return True, path
 
-    def command(self, *, kind: str, session_id: str, mcp: McpSpec | None) -> list[str]:
+    def command(self, *, kind: str, session_id: str, mcp: McpSpec | None, model: str = "", effort: str = "", name: str = "") -> list[str]:
         raise NotImplementedError
+
+    EFFORTS: tuple[str, ...] = ()
+
+    def models(self) -> list[dict[str, Any]]:
+        return []
 
     def parse(self, line: str, state: RunState) -> None:
         raise NotImplementedError
@@ -172,6 +177,17 @@ class ClaudeDriver(Driver):
     binary = "claude"
     label = "Claude Code"
 
+    EFFORTS = ("low", "medium", "high", "xhigh", "max")
+
+    def models(self) -> list[dict[str, Any]]:
+        # Aliases always point at the newest model of each family.
+        return [
+            {"id": "fable", "label": "Fable 5.1", "note": "Most capable"},
+            {"id": "opus", "label": "Opus 5.5", "note": "Deep work"},
+            {"id": "sonnet", "label": "Sonnet 5.5", "note": "Fast and capable"},
+            {"id": "haiku", "label": "Haiku 5.5", "note": "Quick, light tasks"},
+        ]
+
     READ_ONLY_TOOLS = ["Read", "Glob", "Grep", "Bash(git diff:*)", "Bash(git log:*)", "Bash(git show:*)", "Bash(git status:*)"]
     EDIT_TOOLS = ["Edit", "Write", "MultiEdit", "NotebookEdit"]
     # Claude Code's OS sandbox (Seatbelt on macOS, bubblewrap on Linux): shell commands run
@@ -180,8 +196,10 @@ class ClaudeDriver(Driver):
     # --sandbox workspace-write, and it lets Claude run the tests it writes.
     SANDBOX = {"sandbox": {"enabled": True, "autoAllowBashIfSandboxed": True, "allowUnsandboxedCommands": False}}
 
-    def command(self, *, kind: str, session_id: str, mcp: McpSpec | None) -> list[str]:
+    def command(self, *, kind: str, session_id: str, mcp: McpSpec | None, model: str = "", effort: str = "", name: str = "") -> list[str]:
         cmd = [self.resolve() or self.binary, "-p", "--output-format", "stream-json", "--verbose"]
+        if name:
+            cmd += ["--name", name[:80]]
         allowed: list[str] = []
         sandbox = bool(self.settings.get("claude_sandbox", True))
         lean = bool(self.settings.get("lean_workers", True))
@@ -203,9 +221,11 @@ class ClaudeDriver(Driver):
             cmd += ["--permission-mode", mode]
             allowed += list(self.READ_ONLY_TOOLS)
             allowed += [str(t) for t in (self.settings.get("claude_allowed_tools") or [])]
-        model = str(self.settings.get("claude_model") or "").strip()
+        model = (model or str(self.settings.get("claude_model") or "")).strip()
         if model:
             cmd += ["--model", model]
+        if effort in self.EFFORTS:
+            cmd += ["--effort", effort]
         if session_id:
             cmd += ["--resume", session_id]
         if mcp is not None:
@@ -287,8 +307,32 @@ class CodexDriver(Driver):
     name = "codex"
     binary = "codex"
     label = "Codex"
+    EFFORTS = ("low", "medium", "high", "xhigh", "max", "ultra")
+    _catalog: list[dict[str, Any]] | None = None
 
-    def command(self, *, kind: str, session_id: str, mcp: McpSpec | None) -> list[str]:
+    def models(self) -> list[dict[str, Any]]:
+        """Models this Codex login can use (`codex debug models`), cached per process."""
+        if CodexDriver._catalog is not None:
+            return CodexDriver._catalog
+        out: list[dict[str, Any]] = []
+        exe = self.resolve()
+        if exe:
+            import subprocess
+
+            try:
+                raw = subprocess.run([exe, "debug", "models"], capture_output=True, text=True, timeout=20, stdin=subprocess.DEVNULL, env=clean_env()).stdout
+                data = json.loads(raw or "[]")
+                for m in (data.get("models", []) if isinstance(data, dict) else data):
+                    if isinstance(m, dict) and m.get("slug") and m.get("visibility", "list") != "hide":
+                        levels = [e.get("effort") if isinstance(e, dict) else e for e in m.get("supported_reasoning_levels") or []]
+                        out.append({"id": m["slug"], "label": m.get("display_name") or m["slug"], "efforts": [l for l in levels if l],
+                                    "default_effort": m.get("default_reasoning_level") or ""})
+            except Exception:
+                out = []
+        CodexDriver._catalog = out
+        return out
+
+    def command(self, *, kind: str, session_id: str, mcp: McpSpec | None, model: str = "", effort: str = "", name: str = "") -> list[str]:
         exe = self.resolve() or self.binary
         sandbox = "read-only" if kind == "review" else "workspace-write"
         if session_id:
@@ -299,9 +343,11 @@ class CodexDriver(Driver):
             # Measured: 35.7k -> 27.1k prompt tokens per call. Skips the user's config.toml
             # (their MCP servers, profiles, agent roles); auth still comes from CODEX_HOME.
             cmd.append("--ignore-user-config")
-        model = str(self.settings.get("codex_model") or "").strip()
+        model = (model or str(self.settings.get("codex_model") or "")).strip()
         if model:
             cmd += ["--model", model]
+        if effort in self.EFFORTS:
+            cmd += ["-c", f'model_reasoning_effort="{effort}"']
         if mcp is not None:
             # The worker-mode server exposes only thoth_status / thoth_context / thoth_note
             # (read the brain, write a note into it); it cannot launch agents or touch files.

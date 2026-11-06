@@ -185,6 +185,32 @@ def tracked_dirty(path: str | Path) -> bool:
     return bool(git(path, "status", "--porcelain", "--untracked-files=no"))
 
 
+def restore_tree(worktree: Path, commit: str, message: str) -> str | None:
+    """Make the worktree's files exactly those of ``commit`` and record that as a NEW commit.
+
+    Nothing is rewritten: the newer versions stay in history and can be restored again.
+    """
+    git(worktree, "read-tree", "-u", "--reset", commit)
+    git(worktree, "clean", "-fd")
+    if not git(worktree, "status", "--porcelain", "--untracked-files=all"):
+        return None
+    git(worktree, "-c", "user.name=Thoth", "-c", "user.email=thoth@localhost", "commit", "--no-verify", "-m", message)
+    return head(worktree)
+
+
+def merge_into_worktree(worktree: Path, branch: str, message: str) -> tuple[bool, str]:
+    """Bring ``branch`` into a task worktree (e.g. a dependency's newer version). Aborts on conflict."""
+    proc = subprocess.run(
+        ["git", "-c", "user.name=Thoth", "-c", "user.email=thoth@localhost", "merge", "--no-ff", "--no-edit", "-m", message, branch],
+        cwd=str(worktree), capture_output=True, text=True, timeout=GIT_TIMEOUT, stdin=subprocess.DEVNULL,
+    )
+    if proc.returncode == 0:
+        return True, head(worktree)
+    conflicts = git(worktree, "diff", "--name-only", "--diff-filter=U", check=False)
+    git(worktree, "merge", "--abort", check=False)
+    return False, ("Conflicts in: " + ", ".join(conflicts.splitlines())) if conflicts else (proc.stdout + proc.stderr).strip()[:600]
+
+
 def merge_branch(root: Path, branch: str, message: str) -> tuple[bool, str]:
     """Merge ``branch`` into the checked-out branch with --no-ff.
 

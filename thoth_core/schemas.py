@@ -17,6 +17,8 @@ _WORKER = {"type": "string", "enum": ["claude", "codex", "hermes"],
 _KIND = {"type": "string", "enum": ["code", "asset", "doc", "research", "design", "qa"],
          "description": "What the task produces. Not only code: asset (images, sprites, audio), doc, research, design, qa"}
 _ROLE = {"type": "string", "description": "The role the agent plays on this task, e.g. Art pipeline, Game developer, Level designer, QA"}
+_MODEL = {"type": "string", "description": "Model for this agent: Claude Code takes fable, opus, sonnet or haiku (or a full model name); Codex takes a model slug such as gpt-6.1-sol. Empty = the agent's default. See thoth_models."}
+_EFFORT = {"type": "string", "enum": ["low", "medium", "high", "xhigh", "max", "ultra"], "description": "Reasoning effort (ultra is Codex only)"}
 
 TOOLS: dict[str, tuple[str, dict]] = {
     "thoth_init": (
@@ -52,6 +54,8 @@ TOOLS: dict[str, tuple[str, dict]] = {
                             "agent": _WORKER,
                             "kind": _KIND,
                             "role": _ROLE,
+                            "model": _MODEL,
+                            "effort": _EFFORT,
                             "depends_on": {
                                 "type": "array",
                                 "items": {"type": ["string", "integer"]},
@@ -77,6 +81,8 @@ TOOLS: dict[str, tuple[str, dict]] = {
                 "task": _TASK,
                 "agent": _WORKER,
                 "instructions": {"type": "string", "description": "Extra instructions for this run only"},
+                "model": _MODEL,
+                "effort": _EFFORT,
             },
             "required": ["task"],
         },
@@ -91,6 +97,8 @@ TOOLS: dict[str, tuple[str, dict]] = {
                 "task": _TASK,
                 "reviewer": _AGENT,
                 "instructions": {"type": "string", "description": "What to focus on"},
+                "model": _MODEL,
+                "effort": _EFFORT,
             },
             "required": ["task"],
         },
@@ -151,6 +159,8 @@ TOOLS: dict[str, tuple[str, dict]] = {
                 "agent": _WORKER,
                 "kind": _KIND,
                 "role": _ROLE,
+                "model": _MODEL,
+                "effort": _EFFORT,
                 "status": {"type": "string", "enum": ["todo", "cancelled"]},
             },
             "required": ["task"],
@@ -171,6 +181,39 @@ TOOLS: dict[str, tuple[str, dict]] = {
             },
             "required": ["task", "summary"],
         },
+    ),
+    "thoth_revise": (
+        "Send a task back with the user's feedback (\"make the hero's hair blue\", \"the coin is too dark\"). The same agent "
+        "resumes its own session in the task worktree, the feedback is saved on the task for every later run and review, and "
+        "the result is a new version. Use files to name what to redo.",
+        {
+            "type": "object",
+            "properties": {
+                "project": _PROJECT,
+                "task": _TASK,
+                "feedback": {"type": "string", "description": "What should change, in the user's words"},
+                "files": {"type": "array", "items": {"type": "string"}, "description": "Files to redo, e.g. [\"assets/player.png\"]"},
+                "agent": _WORKER,
+                "model": _MODEL,
+                "effort": _EFFORT,
+            },
+            "required": ["task", "feedback"],
+        },
+    ),
+    "thoth_restore": (
+        "Bring back an earlier version of a task (a commit from its history, see thoth_status task=...). Recorded as a new "
+        "version, so nothing is lost and the newer one can be restored again.",
+        {"type": "object", "properties": {"project": _PROJECT, "task": _TASK, "commit": {"type": "string", "description": "Commit id of the version to bring back"}}, "required": ["task", "commit"]},
+    ),
+    "thoth_sync": (
+        "Bring the newest versions of a task's dependencies into its worktree, e.g. after its assets were revised. "
+        "Conflicts are aborted and reported.",
+        {"type": "object", "properties": {"project": _PROJECT, "task": _TASK}, "required": ["task"]},
+    ),
+    "thoth_models": (
+        "List the models and reasoning efforts Claude Code and Codex can use here, to pick one per task "
+        "(e.g. Fable for the hard part, Haiku for quick chores).",
+        {"type": "object", "properties": {"project": _PROJECT}},
     ),
     "thoth_coordinator": (
         "Hand the coordinator role to another AI (hermes, claude or codex). The brain records who coordinates; the "
@@ -203,4 +246,8 @@ EMOJI = {
     "thoth_update_task": "📝",
     "thoth_coordinator": "👑",
     "thoth_complete": "✅",
+    "thoth_revise": "🎨",
+    "thoth_restore": "⏪",
+    "thoth_sync": "🔄",
+    "thoth_models": "🧠",
 }
