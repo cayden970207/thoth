@@ -1,5 +1,5 @@
 name: thoth
-version: 0.1.0
+version: 0.4.0
 manifest_version: 2
 api_version: 1
 description: >-
@@ -13,7 +13,7 @@ author: Cayden
 license: MIT
 homepage: https://github.com/cayden970207/thoth
 kind: standalone
-requires_hermes: ">=0.22.0"
+requires_hermes: ">=0.22.5"
 tags: [multi-agent, coordination, claude-code, codex, delegation, memory, git]
 
 provides_tools:
@@ -121,11 +121,6 @@ config_schema:
     default: true
     label: Link node_modules and .venv into task worktrees
     description: A task worktree is a clean checkout without ignored folders, and agents have no network to reinstall them. Thoth links them from the main checkout (agents can read but not change them). A project setup command, when set, replaces this.
-  copy_env_files:
-    type: bool
-    default: false
-    label: Copy ignored .env files into task worktrees
-    description: Lets agents run code that needs local settings or test keys. Only files git already ignores are copied, so they can never be committed.
   remove_worktree_on_merge:
     type: bool
     default: true

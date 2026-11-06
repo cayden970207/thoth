@@ -18,7 +18,7 @@ const STATUS = {
 }
 const COLUMN_OF = { todo: 'todo', cancelled: 'todo', running: 'build', changes: 'build', failed: 'build', conflict: 'build', built: 'review', reviewing: 'review', approved: 'review', merged: 'done' }
 const COLUMNS = [['todo', 'Planned', 'var(--th-t4)'], ['build', 'Building', 'var(--th-hermes)'], ['review', 'In review', 'var(--th-warn)'], ['done', 'Done', 'var(--th-ok)']]
-const NODE_W = 228, NODE_H = 158, COL_X = 280, ROW_Y = 236, COL_GAP = 262
+const NODE_W = 228, NODE_H = 158, COL_X = 300, ROW_Y = 236, COL_GAP = 300
 const IMG = /\.(png|jpe?g|gif|webp|svg)$/i
 const KIND_ICON = { code: 'build', asset: 'image', doc: 'doc', research: 'search', design: 'palette', qa: 'shield' }
 const GENERIC_ROLES = new Set(['', 'agent', 'sub-agent', 'general-purpose', 'general', 'default', 'worker'])
@@ -44,6 +44,10 @@ function useThumb (task, path, commit = '') {
       .then(r => { thumbs[key] = r.data; tick(n => n + 1) }).catch(() => { thumbs[key] = '' ; tick(n => n + 1) })
   }, [key])
   return thumbs[key] || ''
+}
+// What a task is about at a glance: the first image it made, else the mark of the agent doing it.
+function Subject ({ t, tk, size }) {
+  return tk.images.length ? h(Thumb, { task: t.ref, path: tk.images[0], size }) : h(Mini, { agent: t.agent || 'claude', size })
 }
 function Thumb ({ task, path, size = 28, commit = '', picked = false, onPick }) {
   const src = useThumb(task, path, commit)
@@ -266,7 +270,11 @@ const ICONS = {
   globe: 'M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18zM3 12h18M12 3c2.5 2.6 3.8 5.6 3.8 9s-1.3 6.4-3.8 9c-2.5-2.6-3.8-5.6-3.8-9S9.5 5.6 12 3z',
   grid: 'M4 4h7v7H4zM13 4h7v7h-7zM4 13h7v7H4zM13 13h7v7h-7z',
   external: 'M14 4h6v6M20 4l-9 9M18 14v5H5V6h5',
-  folder: 'M3.5 6.5h6l2 2h9v10h-17z'
+  folder: 'M3.5 6.5h6l2 2h9v10h-17z',
+  layers: 'M12 4l8 4.5-8 4.5-8-4.5zM4 13l8 4.5 8-4.5',
+  collapse: 'M4 14h6v6M20 10h-6V4M14 10l6.5-6.5M3.5 20.5L10 14',
+  target: 'M12 3.5a8.5 8.5 0 1 0 0 17 8.5 8.5 0 0 0 0-17zM12 8.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7z',
+  chip: 'M8 8h8v8H8zM5.5 5.5h13v13h-13zM9.5 2.5v3M14.5 2.5v3M9.5 18.5v3M14.5 18.5v3M2.5 9.5h3M2.5 14.5h3M18.5 9.5h3M18.5 14.5h3'
 }
 function Icon ({ name, size = 16, fill = false, style }) {
   return h('svg', { width: size, height: size, viewBox: '0 0 24 24', fill: fill ? 'currentColor' : 'none', stroke: fill ? 'none' : 'currentColor', strokeWidth: 1.8, strokeLinecap: 'round', strokeLinejoin: 'round', style, 'aria-hidden': true }, h('path', { d: ICONS[name] }))
@@ -386,19 +394,19 @@ function Metrics ({ snap, d, select }) {
   const needs = snap.needs || []
   return h('section', { className: 'th-metrics' },
     h('div', { className: 'th-card th-metric' },
-      h('h3', null, h('span', { className: 'th-tile th-hermes' }, h(Icon, { name: 'merge', size: 15 })), 'Shipped to main'),
+      h('h3', null, 'Shipped to main'),
       h('div', { className: 'th-big' }, merged.length, h('small', null, ' / ' + tasks.length + ' tasks')),
       h('div', { className: 'th-sub' }, merged.length ? 'merged into ' + (snap.meta.base_branch || 'main') : 'Nothing merged yet'),
       h('div', { className: 'th-segs' }, tasks.map(t => h('span', { key: t.id, title: t.ref + ' · ' + (STATUS[t.status] || [t.status])[0], style: { background: t.status === 'merged' ? AGENTS[t.agent || 'claude'].color : t.status === 'todo' ? undefined : `color-mix(in srgb, ${AGENTS[t.agent || 'claude'].color} 32%, transparent)` } })))),
     h('div', { className: 'th-card th-metric th-wide' },
-      h('h3', null, h('span', { className: 'th-tile th-codex' }, h(Icon, { name: 'build', size: 15 })), 'Team activity',
+      h('h3', null, 'Team activity',
         h('span', { className: 'th-legend' }, Object.entries(AGENTS).map(([k, a]) => h('span', { key: k }, h(Mini, { agent: k, size: 16 }), a.name)))),
       h('div', { className: 'th-actrow' },
         h('div', null, h('div', { className: 'th-big' }, total), h('div', { className: 'th-sub' }, 'agent actions')),
         h('svg', { className: 'th-dots', viewBox: `0 0 ${COLS * 10} ${ROWS * 12}`, preserveAspectRatio: 'xMaxYMid meet' }, circles)),
       h(TokenRow, { usage: snap.usage })),
     h('div', { className: 'th-card th-metric' },
-      h('h3', null, h('span', { className: 'th-tile th-claude' }, h(Icon, { name: 'flag', size: 15 })), 'Needs you',
+      h('h3', null, 'Needs you',
         h('span', { className: 'th-status th-s-' + (needs.length ? 'fix' : 'todo'), style: { marginLeft: 'auto' } }, needs.length)),
       needs.length
         ? h('div', { className: 'th-needs' }, needs.slice(0, 3).map((n, i) => h(NeedRow, { key: n.id, n, select, next: i === 0 })), needs.length > 3 ? h('div', { className: 'th-muted', style: { fontSize: 11.5, paddingLeft: 4 } }, `+${needs.length - 3} more`) : null)
@@ -414,7 +422,7 @@ function OverviewStrip ({ snap, select, expand }) {
   const needs = snap.needs || [], u = snap.usage || {}, total = (u.total || {}).prompt || 0
   return h('section', { className: 'th-card th-ostrip' },
     h('button', { className: 'th-ost', onClick: expand, title: 'Show the overview' },
-      h('span', { className: 'th-tile th-hermes' }, h(Icon, { name: 'merge', size: 13 })), h('b', null, merged + '/' + tasks.length), ' shipped'),
+      h('b', null, merged + '/' + tasks.length), ' shipped'),
     h('span', { className: 'th-ost' }, h('b', null, agentActions(snap)), ' agent actions'),
     total ? h('span', { className: 'th-ost', title: `${total.toLocaleString()} prompt tokens` }, h('b', null, compact(total)), ' tok', h('span', { className: 'th-muted' }, ' · '), h('b', null, Math.round((u.cache_rate || 0) * 100) + '%'), ' cached') : null,
     h('span', { className: 'th-ospacer' }),
@@ -481,6 +489,70 @@ function Canvas ({ snap, d, selected, select, project }) {
   }, [snap, folding])
   const { pos, width, height } = useMemo(() => layout(tasks, depth, over), [snap, over, folding])
   useEffect(() => { setOver({}); setPan({ x: 0, y: 0 }) }, [project])
+  // When the layout changes, cards glide from where they were to where they belong (FLIP):
+  // remember every card's place, let React lay out the new one, then animate the difference.
+  // New cards rise into place; cards revealed from the Main card fan out of it.
+  const world = useRef(null)
+  const lastPos = useRef({ project: null, pos: {} })
+  const flip = useRef(null)
+  const flipEnd = useRef(0)
+  const flipping = useRef(new Set())
+  const dragging = useRef(false)
+  const arrange = (change, origin = null) => { flip.current = { prev: { ...lastPos.current.pos }, origin }; change() }
+  useLayoutEffect(() => {
+    const el = world.current
+    const asked = !!flip.current
+    // A card being dragged follows the pointer; everything else that moves glides.
+    const plan = flip.current || (lastPos.current.project === project && !dragging.current ? { prev: lastPos.current.pos, origin: null } : null)
+    flip.current = null
+    lastPos.current = { project, pos }
+    if (!plan || !el) return
+    const moving = []
+    let fresh = 0, moved = false
+    for (const card of el.querySelectorAll('.th-node[data-id]')) {
+      const id = card.dataset.id, to = pos[id]
+      if (!to) continue
+      const known = !!plan.prev[id], from = plan.prev[id] || plan.origin || to
+      const dx = from[0] - to[0], dy = from[1] - to[1]
+      if (known && Math.abs(dx) + Math.abs(dy) < 1) continue
+      if (known) moved = true
+      card.style.transition = 'none'
+      card.style.transform = `translate(${dx}px, ${dy}px)` + (known ? '' : ' scale(.94)')
+      if (!known) card.style.opacity = '0'
+      moving.push([card, known ? 0 : Math.min(40 * fresh++, 360)])
+    }
+    if (!moving.length) { if (asked) el.classList.remove('th-arranging'); return }
+    if (moved) el.classList.add('th-arranging')
+    void el.offsetWidth
+    for (const [card, wait] of moving) {
+      card.style.transition = `transform .6s var(--th-spring) ${wait}ms, opacity .3s ease ${wait}ms`
+      card.style.transform = ''
+      card.style.opacity = ''
+      flipping.current.add(card)
+    }
+    clearTimeout(flipEnd.current)
+    flipEnd.current = setTimeout(() => {
+      el.classList.remove('th-arranging')
+      for (const card of flipping.current) card.style.transition = ''
+      flipping.current.clear()
+    }, 640 + Math.min(40 * fresh, 360))
+  })
+  const toggleFold = e => {
+    e.stopPropagation()
+    const reset = () => { setOver({}); setAuto(true); setPan({ x: 0, y: 0 }) }
+    if (folding || !world.current) return arrange(() => { reset(); setShowShipped(true) }, pos.M)
+    // Folding: the shipped cards slide into the Main card first, then the rest closes the gap.
+    const el = world.current, ids = new Set(shipped.map(x => x.ref)), [mx, my] = pos.M
+    el.classList.add('th-arranging')
+    for (const card of el.querySelectorAll('.th-node[data-id]')) {
+      const at = pos[card.dataset.id]
+      if (!ids.has(card.dataset.id) || !at) continue
+      card.style.transition = 'transform .34s cubic-bezier(.55,0,.75,.2), opacity .3s ease'
+      card.style.transform = `translate(${mx - at[0]}px, ${my - at[1]}px) scale(.92)`
+      card.style.opacity = '0'
+    }
+    setTimeout(() => arrange(() => { reset(); setShowShipped(false) }), 330)
+  }
   useEffect(() => {
     const el = surface.current
     if (!el) return
@@ -515,16 +587,16 @@ function Canvas ({ snap, d, selected, select, project }) {
       const [x1, y1] = anchor(s, 'r'), [x2, y2] = anchor(t.ref, 'l')
       const src = s === 'G' ? null : tasks.find(x => x.ref === s)
       const n = src ? d.byTask[src.id].produced.length : 0
-      edges.push({ k: s + t.ref, d: elbow(x1, y1, x2, y2), cls: live ? 'hot' : t.status !== 'todo' ? 'done' : '', color, label: s === 'G' ? '' : n ? n + ' file' + (n > 1 ? 's' : '') + ' →' : 'after', lx: (x1 + x2) / 2, ly: (y1 + y2) / 2 })
+      edges.push({ k: s + t.ref, d: elbow(x1, y1, x2, y2), cls: live ? 'hot' : t.status !== 'todo' ? 'done' : '', color, label: s === 'G' ? '' : n ? plural(n, 'file') : 'after', lx: (x1 + x2) / 2, ly: (y1 + y2) / 2 })
     }
     if (!hasChild.has(t.id)) { const [x1, y1] = anchor(t.ref, 'r'), [x2, y2] = anchor('M', 'l'); edges.push({ k: t.ref + 'M', d: elbow(x1, y1, x2, y2), cls: t.status === 'merged' ? 'done' : '' }) }
   }
   const drag = (id) => (e) => {
-    if (!e.target.closest('.th-node-hd')) return
+    if (!e.target.closest('.th-node-hd') || e.target.closest('button')) return
     const sx = e.clientX, sy = e.clientY, [ox, oy] = pos[id]
     let moved = false
-    const move = ev => { const dx = (ev.clientX - sx) / zoom, dy = (ev.clientY - sy) / zoom; if (Math.abs(dx) + Math.abs(dy) > 3) moved = true; setOver(o => ({ ...o, [id]: [ox + dx, oy + dy] })) }
-    const up = () => { removeEventListener('pointermove', move); removeEventListener('pointerup', up); if (moved) e.target.closest('.th-node').dataset.moved = '1' }
+    const move = ev => { const dx = (ev.clientX - sx) / zoom, dy = (ev.clientY - sy) / zoom; if (!moved && Math.abs(dx) + Math.abs(dy) <= 3) return; moved = dragging.current = true; setOver(o => ({ ...o, [id]: [ox + dx, oy + dy] })) }
+    const up = () => { removeEventListener('pointermove', move); removeEventListener('pointerup', up); dragging.current = false; if (moved) e.target.closest('.th-node').dataset.moved = '1' }
     addEventListener('pointermove', move); addEventListener('pointerup', up)
   }
   const startPan = e => {
@@ -544,16 +616,16 @@ function Canvas ({ snap, d, selected, select, project }) {
   const cursors = Object.entries(agents).filter(([, a]) => a.busy && a.task && pos[a.task])
   const ox = surface.current ? Math.max(10, (surface.current.clientWidth - width * zoom) / 2) : 10
   const node = (id, content, extra = {}) => h('div', {
-    key: id, className: 'th-node' + (selected === id ? ' th-sel' : '') + (extra.working ? ' th-working' : '') + (extra.attention ? ' th-attn' : '') + (extra.stack ? ' th-stack' : '') + (flashing(id) ? ' th-flash' : ''), style: { left: pos[id][0], top: pos[id][1] },
+    key: id, 'data-id': id, className: 'th-node' + (selected === id ? ' th-sel' : '') + (extra.working ? ' th-working' : '') + (extra.attention ? ' th-attn' : '') + (extra.stack ? ' th-stack' : '') + (flashing(id) ? ' th-flash' : ''), style: { left: pos[id][0], top: pos[id][1] },
     onPointerDown: drag(id), onClick: e => { const n = e.currentTarget; if (n.dataset.moved) { delete n.dataset.moved; return } if (id !== 'G' && id !== 'M') select(id) }
   }, content)
   const goal = snap.meta.goal || 'Shared goal'
   return h('div', { className: 'th-view th-canvas', ref: surface, onPointerDown: startPan },
-    h('div', { className: 'th-world', style: { width, height, transform: `translate(${ox + pan.x}px, ${22 + pan.y}px) scale(${zoom})` } },
+    h('div', { className: 'th-world', ref: world, style: { width, height, transform: `translate(${ox + pan.x}px, ${22 + pan.y}px) scale(${zoom})` } },
       h('svg', { className: 'th-edges', width, height }, edges.map(e => h('path', { key: e.k, d: e.d, className: 'th-edge ' + e.cls, style: e.color ? { stroke: e.color } : undefined }))),
       edges.filter(e => e.label).map(e => h('span', { key: 'l' + e.k, className: 'th-elabel', style: { left: e.lx, top: e.ly } }, e.label)),
       node('G', [
-        h('div', { key: 'h', className: 'th-node-hd' }, h('span', { className: 'th-type th-hermes' }, h(Icon, { name: 'plan', size: 13 }), 'Plan')),
+        h('div', { key: 'h', className: 'th-node-hd' }, h('span', { className: 'th-eyebrow' }, h(Icon, { name: 'target', size: 12 }), h('span', null, 'Plan'))),
         h('div', { key: 't', className: 'th-node-ttl' }, goal.length > 70 ? goal.slice(0, 68) + '…' : goal),
         h('div', { key: 'm', className: 'th-meta' }, h('span', { className: 'th-tag' }, plural(all.length, 'task')), h('span', { className: 'th-tag' }, plural((snap.notes || []).filter(n => n.kind === 'decision').length, 'decision'))),
         h('div', { key: 'f', className: 'th-node-ft' }, h(Mini, { agent: snap.meta.coordinator || 'hermes' }), h('span', { className: 'th-muted' }, 'coordinator'))
@@ -563,14 +635,13 @@ function Canvas ({ snap, d, selected, select, project }) {
         const agent = t.agent || 'claude'
         const label = t.role || KIND_LABEL[kind]
         return node(t.ref, [
-          h('div', { key: 'h', className: 'th-node-hd' }, h('span', { className: 'th-type th-' + agent, title: KIND_LABEL[kind] + (t.role ? ' · ' + t.role : '') }, h(Icon, { name: KIND_ICON[kind] || 'build', size: 13 }), label.length > 22 ? label.slice(0, 21) + '…' : label), h('span', { className: 'th-mono th-muted' }, t.ref),
-            null),
+          h('div', { key: 'h', className: 'th-node-hd' }, h('span', { className: 'th-eyebrow', title: AGENTS[agent].name + ' · ' + KIND_LABEL[kind] + (t.role ? ' · ' + t.role : '') }, h('i', { className: 'th-dot', style: { background: AGENTS[agent].color } }), h('span', null, label)), h('span', { className: 'th-mono th-ref' }, t.ref)),
           h('div', { key: 't', className: 'th-node-ttl' }, t.title),
           h('div', { key: 'm', className: 'th-meta' },
             tk.images.slice(0, 3).map(p => h(Thumb, { key: p, task: t.ref, path: p, size: 22 })),
             tk.produced.length ? h('span', { className: 'th-tag', title: tk.produced.join('\n') }, h(Icon, { name: 'file', size: 11 }), ' ' + tk.produced.length) : null,
             tk.add ? h('span', { className: 'th-tag th-add' }, '+' + tk.add) : null,
-            t.model ? h('span', { className: 'th-tag th-modeltag', title: 'Model' + (t.effort ? ' · ' + t.effort + ' effort' : '') }, h(Icon, { name: 'spark', size: 10 }), ' ' + modelLabel(agent, t.model).replace(/ \d.*$/, '')) : null,
+            t.model ? h('span', { className: 'th-tag th-modeltag', title: 'Model' + (t.effort ? ' · ' + t.effort + ' effort' : '') }, modelLabel(agent, t.model).replace(/ \d.*$/, '')) : null,
             t.head_commit && t.head_commit !== t.base_commit && !tk.images.length ? h('span', { className: 'th-tag' }, short(t.head_commit)) : null,
             !t.branch ? h('span', { className: 'th-tag' }, 'not started') : null),
           h('div', { key: 'f', className: 'th-node-ft' }, h('span', { style: { display: 'flex' } }, h(Presence, { agent, live: tk.open }), t.status !== 'todo' ? h(Presence, { agent: tk.reviewer, live: tk.open }) : null),
@@ -589,10 +660,12 @@ function Canvas ({ snap, d, selected, select, project }) {
         ], { working: !!tk.open, attention: ((snap.needs || [])[0] || {}).task === t.ref })
       }),
       node('M', [
-        h('div', { key: 'h', className: 'th-node-hd' }, h('span', { className: 'th-type th-plain' }, h(Icon, { name: 'merge', size: 13 }), 'Main')),
+        h('div', { key: 'h', className: 'th-node-hd' }, h('span', { className: 'th-eyebrow' }, h(Icon, { name: 'merge', size: 12 }), h('span', null, 'Main')),
+          shipped.length > 2 ? h('button', { className: 'th-fold' + (folding ? '' : ' th-on'), onClick: toggleFold, 'aria-expanded': !folding,
+            title: folding ? `${plural(shipped.length, 'shipped task')} folded in here · click to lay them out` : 'Fold the shipped tasks back into Main' },
+          h(Icon, { name: folding ? 'layers' : 'collapse', size: 12 }), shipped.length) : null),
         h('div', { key: 't', className: 'th-node-ttl' }, 'Merge into ' + (snap.meta.base_branch || 'main')),
         h('div', { key: 'm', className: 'th-meta' }, h('span', { className: 'th-tag' }, all.filter(t => t.status === 'merged').length + ' merged'),
-          shipped.length > 2 ? h('button', { className: 'th-tag th-tagbtn', title: folding ? 'Show the shipped tasks on the canvas' : 'Fold shipped tasks back into Main', onClick: e => { e.stopPropagation(); setShowShipped(v => !v); setAuto(true); setPan({ x: 0, y: 0 }) } }, folding ? 'Show ' + shipped.length : 'Fold') : null,
           all.some(t => t.status === 'merged' && ((snap.meta.run || '').trim() || hasPage(d.byTask[t.id]))) ? h('button', { className: 'th-tag th-tagbtn', title: 'Open everything merged so far in your browser', onClick: e => { e.stopPropagation(); openPreview('') } }, h(Icon, { name: 'play', size: 10 }), ' Open') : null),
         h('div', { key: 'f', className: 'th-node-ft' }, h('span', { className: 'th-muted' }, 'Needs your approval'),
           (() => { const ready = tasks.filter(t => t.status === 'approved').length; return h('span', { className: 'th-status th-s-' + (ready ? 'ok' : 'todo') }, ready ? ready + ' ready' : 'Waiting') })())
@@ -600,12 +673,15 @@ function Canvas ({ snap, d, selected, select, project }) {
       tasks.flatMap(t => {
         const dl = d.byTask[t.id].delegations
         if (!dl.length || !pos[t.ref]) return []
-        const [x, y] = pos[t.ref], shown = dl.slice(-3)
+        const [x, y] = pos[t.ref], shown = dl.slice(-2)
+        const name = s => { const l = subLabel(s); return l.length > 12 ? l.slice(0, 11) + '…' : l }
+        let left = 8
+        const at = shown.map(s => { const here = left; left += 44 + Math.ceil(name(s).length * 6.4) + 6; return here })
         const out = [h('svg', { key: 'sv' + t.ref, className: 'th-sat-lines', style: { left: x, top: y + NODE_H, width: NODE_W, height: 34 } },
-          shown.map((s, i) => { const cx = 30 + i * 100; return h('path', { key: i, d: `M${NODE_W / 2},0 C${NODE_W / 2},16 ${cx},10 ${cx},28`, className: 'th-sat-line' + (s.status === 'running' ? ' hot' : '') }) }))]
-        shown.forEach((s, i) => out.push(h('div', { key: 'sat' + t.ref + i, className: 'th-sat th-sat-' + s.status, style: { left: x + 8 + i * 100, top: y + NODE_H + 26 }, title: `${AGENTS[s.by].name} delegated to ${s.role || 'a sub-agent'}: ${s.title || ''}` },
-          h(Mini, { agent: s.by, size: 14 }), h('span', null, subLabel(s).length > 13 ? subLabel(s).slice(0, 12) + '…' : subLabel(s)), h('i', null))))
-        if (dl.length > 3) out.push(h('span', { key: 'more' + t.ref, className: 'th-sat th-sat-more', style: { left: x + 8 + 3 * 100, top: y + NODE_H + 26 } }, '+' + (dl.length - 3)))
+          shown.map((s, i) => { const cx = at[i] + 10; return h('path', { key: i, d: `M${NODE_W / 2},0 C${NODE_W / 2},16 ${cx},10 ${cx},28`, className: 'th-sat-line' + (s.status === 'running' ? ' hot' : '') }) }))]
+        shown.forEach((s, i) => out.push(h('div', { key: 'sat' + t.ref + i, className: 'th-sat th-sat-' + s.status, style: { left: x + at[i], top: y + NODE_H + 26 }, title: `${AGENTS[s.by].name} delegated to ${s.role || 'a sub-agent'}: ${s.title || ''}` },
+          h(Mini, { agent: s.by, size: 14 }), h('span', null, name(s)), h('i', null))))
+        if (dl.length > 2) out.push(h('span', { key: 'more' + t.ref, className: 'th-sat th-sat-more', style: { left: x + left, top: y + NODE_H + 26 }, title: dl.slice(0, -2).map(s => subLabel(s)).join('\n') }, '+' + (dl.length - 2)))
         return out
       }),
       cursors.map(([k, a], i) => {
@@ -619,7 +695,7 @@ function Canvas ({ snap, d, selected, select, project }) {
       h('button', { onClick: () => { setAuto(false); setZoom(z => Math.max(0.4, z - 0.1)) }, 'aria-label': 'Zoom out' }, '−'),
       h('span', null, Math.round(zoom * 100) + '%'),
       h('button', { onClick: () => { setAuto(false); setZoom(z => Math.min(1.6, z + 0.1)) }, 'aria-label': 'Zoom in' }, '+'),
-      h('button', { onClick: () => { setAuto(true); setOver({}); setPan({ x: 0, y: 0 }) }, 'aria-label': 'Fit and tidy', title: 'Fit and tidy' }, h(Icon, { name: 'fit', size: 14 }))))
+      h('button', { onClick: () => arrange(() => { setAuto(true); setOver({}); setPan({ x: 0, y: 0 }) }), 'aria-label': 'Fit and tidy', title: 'Fit and tidy' }, h(Icon, { name: 'fit', size: 14 }))))
 }
 
 function Board ({ snap, d, selected, select, askMerge }) {
@@ -656,7 +732,7 @@ function TaskCard ({ t, tk, sel, select }) {
   const pct = total ? Math.round((total - open) / total * 100) : ['approved', 'merged'].includes(t.status) ? 100 : 0
   const label = total ? `${total - open} of ${total} fixed` : ['approved', 'merged'].includes(t.status) ? 'Review passed' : t.status === 'todo' ? 'Not started' : tk.open ? 'In progress' : 'No review yet'
   return h('article', { className: 'th-tcard' + (sel ? ' th-sel' : '') + (tk.open ? ' th-working' : '') + (flashing(t.ref) ? ' th-flash' : ''), draggable: true, onDragStart: e => e.dataTransfer.setData('text/plain', t.ref), onClick: () => select(t.ref) },
-    h('div', { className: 'th-top' }, h('span', { className: 'th-ico th-' + agent }, h(Icon, { name: KIND_ICON[t.kind || 'code'] || 'build', size: 17 })),
+    h('div', { className: 'th-top' }, h(Subject, { t, tk, size: 34 }),
       h('div', { style: { minWidth: 0, flex: 1 } }, h('div', { className: 'th-role' }, t.role || KIND_LABEL[t.kind || 'code']), h('div', { className: 'th-ttl' }, t.title))),
     tk.produced.length ? h('div', { className: 'th-strip' }, tk.images.slice(0, 4).map(p => h(Thumb, { key: p, task: t.ref, path: p, size: 30 })),
       h('span', { className: 'th-tag', title: tk.produced.join('\n') }, h(Icon, { name: 'file', size: 11 }), ' ' + tk.produced.length + ' produced')) : null,
@@ -689,7 +765,7 @@ function Revise ({ t, tk }) {
   const note = picked.length ? `Only ${picked.length} marked file${picked.length > 1 ? 's' : ''} will be redone`
     : (same ? 'Same ' + AGENTS[agent].name + ' session' : AGENTS[agent].name + ' takes over') + ' · new version'
   return h('div', { className: 'th-revise' },
-    h('div', { className: 'th-revise-hd' }, h('span', { className: 'th-sec' }, 'Not quite right?'), tk.images.length ? h('span', null, 'Tap images to redo only those') : null),
+    h('div', { className: 'th-revise-hd' }, h('span', { className: 'th-sec' }, 'Not quite right?'), tk.images.length ? h('span', { title: 'Tap images to redo only those' }, 'Pick images to redo') : null),
     tk.images.length ? h('div', { className: 'th-ver-imgs', style: { margin: '0 0 8px' } }, tk.images.slice(0, 8).map(pth => h(Thumb, { key: pth, task: t.ref, path: pth, size: 40, picked: picked.includes(pth), onPick: toggle }))) : null,
     h('textarea', { className: 'th-textarea', rows: 3, value: text, placeholder: tk.images.length ? 'e.g. Give the hero blue hair and a bigger sword' : 'e.g. Make the score bigger and add a restart button', onChange: e => setText(e.target.value), onKeyDown: e => { if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') { e.preventDefault(); send() } } }),
     h('div', { className: 'th-revise-who' },
@@ -749,8 +825,8 @@ function Inspector ({ snap, d, selected, tab, setTab, close }) {
   const err = !tk.open && last && ['failed', 'cancelled', 'timeout', 'lost'].includes(last.status) && last.error ? last.error : ''
   const vers = [...tk.versions].reverse()
   return h('div', { className: 'th-pane' },
-    h('div', { className: 'th-ihead' }, h('span', { className: 'th-ico th-' + agent, style: { width: 40, height: 40 } }, h(Icon, { name: KIND_ICON[t.kind || 'code'] || 'build', size: 19 })),
-      h('div', { style: { minWidth: 0 } }, h('div', { className: 'th-mono th-muted', style: { whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' } }, t.ref + ' · ' + (t.role ? t.role + ' · ' : '') + KIND_LABEL[t.kind || 'code']), h('div', { className: 'th-ititle' }, t.title))),
+    h('div', { className: 'th-ihead' }, h(Subject, { t, tk, size: 40 }),
+      h('div', { style: { minWidth: 0 } }, h('div', { className: 'th-ieyebrow' }, h('span', null, AGENTS[agent].name + ' · ' + (t.role || KIND_LABEL[t.kind || 'code'])), h('span', { className: 'th-mono' }, t.ref)), h('div', { className: 'th-ititle' }, t.title))),
     (() => {
       // With a project run command the app is started for this version; otherwise its pages are served as files.
       const runs = !!(snap.meta.run || '').trim()
@@ -771,7 +847,7 @@ function Inspector ({ snap, d, selected, tab, setTab, close }) {
       h('span', { className: 'th-k' }, h(Icon, { name: 'flag', size: 14 }), 'Status'), h('span', null, h(StatusPill, { status: t.status })),
       h('span', { className: 'th-k' }, h(Icon, { name: 'build', size: 14 }), 'Builder'), h('span', { className: 'th-person' }, h(Mini, { agent }), A(agent)),
       h('span', { className: 'th-k' }, h(Icon, { name: 'review', size: 14 }), 'Reviewer'), h('span', { className: 'th-person' }, h(Mini, { agent: tk.reviewer }), A(tk.reviewer)),
-      h('span', { className: 'th-k' }, h(Icon, { name: 'spark', size: 14 }), 'Model'), h('span', null, h(ModelPicker, { agent, model: t.model || '', effort: t.effort || '', onChange: v => act({ action: 'update', task: t.ref, model: v.model, effort: v.effort }, () => `${t.ref} will use ${modelLabel(agent, v.model)}${v.effort ? ' · ' + v.effort + ' effort' : ''}`) })),
+      h('span', { className: 'th-k' }, h(Icon, { name: 'chip', size: 14 }), 'Model'), h('span', null, h(ModelPicker, { agent, model: t.model || '', effort: t.effort || '', onChange: v => act({ action: 'update', task: t.ref, model: v.model, effort: v.effort }, () => `${t.ref} will use ${modelLabel(agent, v.model)}${v.effort ? ' · ' + v.effort + ' effort' : ''}`) })),
       reachOf(snap, t.ref).length ? [
         h('span', { key: 'rk', className: 'th-k' }, h(Icon, { name: 'arrowr', size: 14 }), 'Reached'),
         h('span', { key: 'rv', className: 'th-reachlist' }, reachOf(snap, t.ref).map(e => h('span', { key: e.agent, className: 'th-reachrow', title: reachWords(e, t.ref) },
@@ -1004,7 +1080,7 @@ function ThothPage () {
           h('button', { className: 'th-btn th-sm th-primary', onClick: () => openChat(ask.session) }, 'Open chat'),
           h('button', { className: 'th-ib', 'aria-label': 'Dismiss', onClick: () => { store.dismissedAsk = ask.at; emit() } }, h(Icon, { name: 'x', size: 14 })))
       })(),
-      s.newProject ? h('div', { className: 'th-banner', role: 'status' }, h(Icon, { name: 'spark', size: 15 }),
+      s.newProject ? h('div', { className: 'th-banner', role: 'status' }, h(Icon, { name: 'folder', size: 15 }),
         h('span', null, 'Hermes started a new project: ', h('b', null, s.newProject.name), s.newProject.goal ? ' — ' + s.newProject.goal : ''),
         h('button', { className: 'th-btn th-sm th-primary', onClick: () => switchProject(s.newProject.path) }, 'Open it'),
         h('button', { className: 'th-ib', 'aria-label': 'Dismiss', onClick: () => { store.newProject = null; emit() } }, h(Icon, { name: 'x', size: 14 }))) : null,
@@ -1104,7 +1180,7 @@ function CommandBar ({ snap, project, d }) {
           : { kind: 'info', message: 'Put in the Hermes composer — press Enter to send' })
   }
   return h('section', { className: 'th-cmd th-composer' },
-    chips.length ? h('div', { className: 'th-cmd-chips' }, chips.map(c => h('button', { key: c, className: 'th-cmd-chip', title: 'Send to Hermes: ' + c, onClick: () => send(c) }, h(Icon, { name: 'spark', size: 11 }), c))) : null,
+    chips.length ? h('div', { className: 'th-cmd-chips' }, chips.map(c => h('button', { key: c, className: 'th-cmd-chip', title: 'Send to Hermes: ' + c, onClick: () => send(c) }, c))) : null,
     h('div', { className: 'th-cmd-box' },
       h(Mini, { agent: 'hermes', size: 26 }),
       h('kbd', { className: 'th-kbd', title: 'Press / to type here' }, '/'),
@@ -1155,7 +1231,7 @@ function ModelPicker ({ agent, model, effort, onChange, compact = false }) {
   }
   return h('span', { className: 'th-switch', ref },
     h('button', { ref: btn, className: 'th-modelbtn' + (compact ? ' th-compact' : ''), onClick: toggle, title: 'Model and reasoning effort for ' + AGENTS[agent].name },
-      h(Icon, { name: 'spark', size: 12 }), h('span', null, label), h('svg', { width: 10, height: 10, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 2.4, strokeLinecap: 'round' }, h('path', { d: 'M7 10l5 5 5-5' }))),
+      h('span', null, label), h('svg', { width: 10, height: 10, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 2.4, strokeLinecap: 'round' }, h('path', { d: 'M7 10l5 5 5-5' }))),
     open ? h('div', { className: 'th-menu th-modelmenu', style: pos || undefined },
       h('div', { className: 'th-mm-sec' }, AGENTS[agent].name + ' model'),
       h('button', { className: 'th-menu-it th-mm-it' + (!model ? ' th-on' : ''), onClick: () => { onChange({ model: '', effort }); setOpen(false) } }, h('b', null, 'Default'), h('span', null, 'Whatever ' + AGENTS[agent].name + ' is set to')),
@@ -1334,7 +1410,7 @@ height:100%;display:flex;flex-direction:column;color:var(--th-text);font-size:13
 @media (max-width:1180px){.th-metrics{grid-template-columns:1fr 1fr}.th-metrics .th-wide{grid-column:1/-1;order:3}}
 .th-metric{padding:14px 16px;min-height:140px;display:flex;flex-direction:column;min-width:0}
 .th-metric h3{margin:0;display:flex;align-items:center;gap:9px;font-size:13px;font-weight:600}
-.th-tile{width:28px;height:28px;border-radius:9px;display:grid;place-items:center;flex-shrink:0}
+
 .th-big{font-size:32px;font-weight:600;letter-spacing:-.03em;line-height:1;margin-top:12px;font-variant-numeric:tabular-nums}.th-big small{font-size:15px;color:var(--th-t3);font-weight:500;letter-spacing:0}
 .th-sub{font-size:12px;color:var(--th-t3);margin-top:6px}
 .th-segs{display:flex;gap:5px;margin-top:auto;padding-top:12px}.th-segs span{flex:1;height:6px;border-radius:3px;background:var(--th-sunken);transition:background .6s}
@@ -1361,11 +1437,20 @@ height:100%;display:flex;flex-direction:column;color:var(--th-text);font-size:13
 .th-edges{position:absolute;inset:0;overflow:visible;pointer-events:none}
 .th-edge{fill:none;stroke:var(--th-line2);stroke-width:1.5;transition:stroke .4s}.th-edge.done{stroke:var(--th-ok);opacity:.65}.th-edge.hot{stroke-width:2;stroke-dasharray:5 6;animation:th-flow .8s linear infinite}
 @keyframes th-flow{to{stroke-dashoffset:-22}}
-.th-elabel{position:absolute;transform:translate(-50%,-50%);font-size:11px;color:var(--th-t3);background:var(--th-panel);border:1px solid var(--th-line);border-radius:7px;padding:1px 7px}
+.th-elabel{position:absolute;white-space:nowrap;transform:translate(-50%,-50%);font-size:11px;color:var(--th-t3);background:var(--th-panel);border:1px solid var(--th-line);border-radius:7px;padding:1px 7px}
 .th-node{position:absolute;width:${NODE_W}px;height:${NODE_H}px;background:var(--th-panel);border:1px solid var(--th-line);border-radius:16px;box-shadow:var(--th-shadow);padding:10px 12px;display:flex;flex-direction:column;cursor:pointer;user-select:none;transition:box-shadow .3s,border-color .3s}
 .th-node:hover{box-shadow:var(--th-lift)}.th-node.th-sel{border-color:var(--th-select);box-shadow:0 0 0 3px color-mix(in srgb,var(--th-select) 18%,transparent),var(--th-lift)}
-.th-node-hd{display:flex;align-items:center;gap:8px;cursor:grab}
-.th-type{display:inline-flex;align-items:center;gap:6px;height:23px;padding:0 9px 0 7px;border-radius:8px;font-size:11.5px;font-weight:600;white-space:nowrap;min-width:0;overflow:hidden;text-overflow:ellipsis;flex-shrink:1}.th-type svg{flex-shrink:0}
+.th-node-hd{display:flex;align-items:center;gap:8px;min-height:22px;cursor:grab}
+.th-eyebrow{display:inline-flex;align-items:center;gap:7px;min-width:0;flex:1;font-size:11.5px;font-weight:500;color:var(--th-t3);letter-spacing:.01em;white-space:nowrap}
+.th-eyebrow>span{overflow:hidden;text-overflow:ellipsis}.th-eyebrow svg{flex-shrink:0;color:var(--th-t4)}
+.th-dot{width:7px;height:7px;border-radius:50%;flex-shrink:0}
+.th-ref{color:var(--th-t4);font-size:11px;flex-shrink:0}
+.th-root .th-fold{display:inline-flex;align-items:center;gap:4px;height:22px;padding:0 7px;border-radius:7px;flex-shrink:0;font-size:11.5px;font-weight:600;font-variant-numeric:tabular-nums;color:var(--th-t2);border:1px solid var(--th-line2)!important;background:var(--th-panel)!important;transition:background .2s,color .2s,border-color .2s}
+.th-root .th-fold:hover{background:var(--th-hover)!important;color:var(--th-text)}.th-root .th-fold.th-on{background:var(--th-sunken)!important;border-color:transparent!important}
+.th-fold svg{color:var(--th-t3)}
+.th-edges,.th-elabel,.th-sat,.th-sat-lines{transition:opacity .35s ease}
+.th-world.th-arranging .th-edges,.th-world.th-arranging .th-elabel,.th-world.th-arranging .th-sat,.th-world.th-arranging .th-sat-lines,.th-world.th-arranging .th-cursor,.th-world.th-arranging .th-behind{opacity:0!important;animation:none!important;transition:none!important}
+
 .th-node-ttl{font-weight:600;font-size:13px;margin:7px 2px 0;line-height:1.3;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
 .th-meta{display:flex;flex-wrap:wrap;gap:5px;margin-top:6px}
 .th-tag{display:inline-flex;align-items:center;height:19px;padding:0 7px;border-radius:6px;background:var(--th-sunken);font-size:11px;color:var(--th-t2);font-family:var(--font-mono,ui-monospace,monospace)}.th-tag.th-add{color:var(--th-ok)}
@@ -1392,7 +1477,7 @@ height:100%;display:flex;flex-direction:column;color:var(--th-text);font-size:13
 .th-lane{display:grid;gap:11px;min-height:380px;align-content:start;padding:2px;border-radius:16px;transition:background .2s}.th-lane.th-over{background:var(--th-hover)}
 .th-tcard{min-width:0;overflow:hidden;background:var(--th-panel);border:1px solid var(--th-line);border-radius:17px;box-shadow:var(--th-shadow);padding:13px;cursor:grab;transition:box-shadow .3s,border-color .3s;animation:th-rise .5s var(--th-spring)}
 .th-tcard:hover{box-shadow:var(--th-lift)}.th-tcard.th-sel{border-color:var(--th-select)}
-.th-top{display:flex;align-items:center;gap:10px}.th-ico{width:34px;height:34px;border-radius:11px;display:grid;place-items:center;border:1px solid var(--th-line);flex-shrink:0}
+.th-top{display:flex;align-items:center;gap:10px}
 .th-ttl{font-weight:600;font-size:13.5px;letter-spacing:-.01em;line-height:1.3;flex:1;min-width:0}
 .th-prog{display:inline-flex;align-items:center;gap:7px;margin-top:11px;padding:3px 10px 3px 6px;border:1px solid var(--th-line);border-radius:999px;font-size:11.5px;color:var(--th-t2);white-space:nowrap;max-width:100%}
 .th-lbl{overflow:hidden;text-overflow:ellipsis;min-width:0}.th-track{width:40px;height:5px;border-radius:3px;background:var(--th-sunken);overflow:hidden;flex-shrink:0}.th-track span{display:block;height:100%;border-radius:3px;background:var(--th-ok);transition:width .8s var(--th-spring)}
@@ -1407,7 +1492,8 @@ height:100%;display:flex;flex-direction:column;color:var(--th-text);font-size:13
 .th-tabs button{flex:1;height:28px;border-radius:8px;font-size:12.5px;font-weight:600;color:var(--th-t3);transition:background .25s,color .25s}.th-tabs button.th-on{background:var(--th-panel);color:var(--th-text);box-shadow:var(--th-shadow)}
 .th-closeI{display:none!important;width:30px;height:30px;border-radius:9px;place-items:center;color:var(--th-t3)}.th-boardmode .th-closeI{display:grid!important}.th-closeI:hover{background:var(--th-hover)}
 .th-pane{margin-top:8px;animation:th-fade .35s ease}
-.th-ihead{display:flex;gap:12px;align-items:center}.th-ititle{font-weight:600;font-size:15.5px;letter-spacing:-.015em;line-height:1.3}
+.th-ihead{display:flex;gap:12px;align-items:center}.th-ieyebrow{display:flex;gap:8px;align-items:baseline;font-size:12px;color:var(--th-t3);white-space:nowrap;min-width:0}.th-ieyebrow>span:first-child{overflow:hidden;text-overflow:ellipsis}.th-ieyebrow .th-mono{color:var(--th-t4);font-size:11px}
+.th-ititle{font-weight:600;font-size:15.5px;letter-spacing:-.015em;line-height:1.3}
 .th-livebox{display:flex;gap:8px;align-items:center;margin-top:12px;padding:8px 10px;border-radius:11px;background:var(--th-sunken);font-size:12px;color:var(--th-t2)}
 .th-detail{font-size:12.5px;color:var(--th-t2);margin:12px 0 0;line-height:1.5}
 .th-sec{font-size:11px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--th-t4);margin:16px 0 6px;display:flex;justify-content:space-between}
@@ -1458,7 +1544,7 @@ height:100%;display:flex;flex-direction:column;color:var(--th-text);font-size:13
 .th-revise{margin-top:16px;padding:12px;border-radius:14px;background:var(--th-sunken)}
 .th-textarea{width:100%;box-sizing:border-box;resize:vertical;min-height:64px;font:inherit;font-size:12.5px;color:var(--th-text);background:var(--th-panel);border:1px solid var(--th-line2);border-radius:10px;padding:8px 10px;outline:none}
 .th-textarea:focus{border-color:var(--th-select);box-shadow:0 0 0 3px color-mix(in srgb,var(--th-select) 16%,transparent)}
-.th-revise-hd{display:flex;align-items:baseline;justify-content:space-between;gap:8px;margin-bottom:8px}.th-revise-hd .th-sec{margin:0}.th-revise-hd>span:last-child:not(.th-sec){font-size:11px;color:var(--th-t3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.th-revise-hd{display:flex;align-items:baseline;justify-content:space-between;gap:8px;margin-bottom:8px}.th-revise-hd .th-sec{margin:0;white-space:nowrap;flex-shrink:0}.th-revise-hd>span:last-child:not(.th-sec){font-size:11px;color:var(--th-t3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
 .th-revise-who{display:flex;align-items:center;gap:6px;margin-top:8px;flex-wrap:wrap}
 .th-revise-foot{display:flex;align-items:center;gap:10px;margin-top:8px}.th-revise-foot>span{flex:1;min-width:0;font-size:11px;color:var(--th-t3);line-height:1.35}.th-revise-foot .th-btn{flex-shrink:0}
 .th-agentpick{display:flex;gap:2px;background:var(--th-panel);border-radius:9px;padding:2px;border:1px solid var(--th-line)}
@@ -1561,7 +1647,7 @@ height:100%;display:flex;flex-direction:column;color:var(--th-text);font-size:13
 .th-ostrip{display:flex;align-items:center;gap:18px;padding:8px 10px 8px 12px;min-height:48px;flex-wrap:wrap;animation:th-rise .4s var(--th-spring)}
 .th-ost{display:inline-flex;align-items:center;gap:6px;font-size:12.5px;color:var(--th-t3);white-space:nowrap}.th-ost b{color:var(--th-text);font-weight:600;font-variant-numeric:tabular-nums}
 button.th-ost{padding:0;border-radius:8px}button.th-ost:hover b{text-decoration:underline;text-decoration-color:var(--th-line2)}
-.th-ost .th-tile{width:24px;height:24px;border-radius:8px}
+
 .th-ospacer{flex:1}
 .th-need.th-need-inline{background:transparent;padding:2px 2px 2px 8px;grid-template-columns:auto 22px minmax(0,1fr) auto;gap:8px;max-width:520px;min-width:0;flex:0 1 520px;animation:none}
 .th-need-inline .th-nexttag{position:static}.th-need-inline .th-mini{width:22px!important;height:22px!important}
@@ -1570,13 +1656,13 @@ button.th-ost{padding:0;border-radius:8px}button.th-ost:hover b{text-decoration:
 .th-banner{display:flex;align-items:center;gap:10px;padding:7px 7px 7px 14px;border-radius:14px;background:color-mix(in srgb,var(--th-hermes) 8%,var(--th-panel));border:1px solid color-mix(in srgb,var(--th-hermes) 24%,transparent);font-size:12.5px;color:var(--th-t2);animation:th-rise .4s var(--th-spring)}
 .th-banner>span{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.th-banner b{color:var(--th-text)}.th-banner>svg{color:var(--th-hermes);flex-shrink:0}.th-banner .th-ib{width:28px;height:28px}
 .th-quick{display:flex;gap:6px;flex-wrap:wrap;margin-top:10px}
-.th-tagbtn{cursor:pointer;border:0;color:var(--th-hermes);gap:2px}.th-tagbtn:hover{background:color-mix(in srgb,var(--th-hermes) 12%,transparent)}
+.th-root .th-tagbtn{cursor:pointer;border:0;height:19px;padding:0 6px;gap:4px;font-size:11.5px;font-weight:600;color:var(--th-t2);background:transparent}.th-root .th-tagbtn:hover{background:var(--th-hover);color:var(--th-text)}
 .th-canvas{cursor:grab}.th-canvas.th-panning{cursor:grabbing}.th-panning .th-world{transition:none}
 .th-node.th-stack{box-shadow:5px 5px 0 -1px var(--th-panel),5px 5px 0 0 var(--th-line2),10px 10px 0 -1px var(--th-panel),10px 10px 0 0 var(--th-line),var(--th-shadow)}
 .th-presence{position:relative;display:inline-flex;border-radius:50%}.th-presence::after{content:"";position:absolute;inset:-3px;border-radius:50%;border:2px solid var(--c);animation:th-attn 1.6s ease-out infinite;pointer-events:none}
 .th-otile{display:inline-grid;place-items:center;position:relative;border-radius:9px;border:1px solid var(--th-line);color:var(--th-t3);background:var(--th-sunken);flex-shrink:0}
-.th-otile-video{background:linear-gradient(160deg,#20232b,#3a3f4b);color:#fff;border-color:transparent}.th-otile-audio{background:color-mix(in srgb,var(--th-hermes) 14%,var(--th-panel));color:var(--th-hermes)}
-.th-otile-page{background:color-mix(in srgb,var(--th-codex) 10%,var(--th-panel));color:var(--th-codex)}.th-otile-pdf,.th-otile-text{background:var(--th-panel)}
+.th-otile-video{background:linear-gradient(160deg,#20232b,#3a3f4b);color:#fff;border-color:transparent}.th-otile-audio{background:var(--th-panel);color:var(--th-t2)}
+.th-otile-page{background:var(--th-panel);color:var(--th-t2)}.th-otile-pdf,.th-otile-text{background:var(--th-panel)}
 .th-oplay{position:absolute;right:6px;bottom:6px;width:20px;height:20px;border-radius:50%;display:grid;place-items:center;background:rgba(255,255,255,.92);color:#111}
 .th-otile-sm{width:28px;height:28px;border-radius:8px;display:grid;place-items:center;border:1px solid var(--th-line);background:var(--th-sunken);color:var(--th-t2);flex-shrink:0}
 .th-ofig{cursor:pointer}.th-ofig:hover .th-thumbimg,.th-ofig:hover .th-otile{box-shadow:0 0 0 2px var(--th-select)}

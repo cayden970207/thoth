@@ -1,5 +1,7 @@
 # Thoth — one brain for Claude Code, Codex and Hermes
 
+![Thoth: one brain for Claude Code, Codex and Hermes](docs/banner.png)
+
 You use Claude Code, Codex and Hermes. Each is good at different things, but they
 don't know about each other: no shared context, no shared progress, and they
 overwrite each other's files when they work on the same project.
@@ -9,6 +11,8 @@ shared board, starts the **real** Claude Code and Codex CLIs on tasks in paralle
 has each one review the other's work, and merges the result. Everything the team
 knows lives in one shared brain in your project, and the coordinator role can move
 to Claude Code or Codex at any time.
+
+![The Thoth page in Hermes Desktop: overview, live canvas, task inspector and the command bar](docs/screenshots/overview.png)
 
 ```
                 ┌──────────────── Hermes (coordinator) ────────────────┐
@@ -43,6 +47,40 @@ ImageMagick), Claude Code builds, and Hermes can take a task itself (`thoth_assi
 then `thoth_complete`). The Thoth page shows what every agent read, changed and produced (images as
 thumbnails), which files moved between tasks, and every sub-agent an agent delegated to.
 
+Not happy with a result? **Send it back** with your words: the same agent continues in its own session
+(on another model if you pick one) and makes a new version. Every version stays one click from being
+restored.
+
+![A Codex sprite task: send-back box with model choice, and two versions with their images](docs/screenshots/revise-versions.png)
+
+## One CRM, built two ways
+
+Codex (GPT-6-Astra) builds the backend, Claude Code (Opus 5.5) builds the frontend, then both add a
+pipeline stage to contacts. Same specs, same models, no packages; one run of each.
+
+![The CRM on the Thoth canvas: Codex's backend tasks and Claude Code's frontend tasks, merged into main](docs/screenshots/cross-agent-canvas.png)
+
+| | By hand (you pass work between agents) | Thoth, the four builds | Thoth with two cross-reviews and a fix |
+|---|---|---|---|
+| Prompt tokens | 3.27M | **2.41M (−26%)** | 3.47M |
+| Output tokens | 85k | 52k (−39%) | 66k |
+| Agent time | 17.2 min | **11.1 min (−35%)** | 15.1 min |
+| Frontend calls that work against the backend | 9/9, then 9/9 | 10/10, then 10/10 | |
+| Real bugs caught | none (nobody reviewed) | | **2, fixed** — and both were in the by-hand build too |
+| Messages you have to relay | 2, and you must know what changed | 0 | 0 |
+| Shared memory afterwards | none beyond the code | 5 API decisions, in every later brief | |
+
+What made the difference: Claude's brief already held Codex's summary, its files and the API decisions
+it recorded, so nobody pasted anything; each task ran in its own worktree; and Codex reviewing Claude's
+frontend found an overlapping-refresh race and an invalid-number-saved-as-zero bug. What did not change:
+a follow-up task starts a fresh session, so Claude re-read the backend about as often as it did by hand.
+
+**Who has the newest version.** After the arrow on a card are the agents whose work builds on it: a check
+when they have its newest version, the version they have (`v2`) when they built on an older one. A task whose dependency moved on
+says **1 change behind · Update**; one click (or `thoth_sync`) brings the newer version in.
+
+![Codex's Contacts API has a newer version than the one Claude Code's Contacts UI was built on](docs/screenshots/reach.png)
+
 ## Context, tokens and memory
 
 Measured on real runs (see `thoth_status` → `tokens`, or the Team activity card):
@@ -56,6 +94,8 @@ Measured on real runs (see `thoth_status` → `tokens`, or the Team activity car
   MCP servers: one call's fixed prompt drops from 46.8k to 25.2k tokens for Claude Code and from 35.7k
   to 27.1k for Codex. Every call re-sends that prefix, so a 10–30 call run saves 200k–600k tokens.
 - **Caching does the rest:** 82–95 % of prompt tokens in our runs were cache hits.
+- **Small tool surface:** all 18 Thoth tools add about 2.3k tokens to a coordinator call (3 tools,
+  about 300 tokens, for a worker).
 - **Memory:** the brain (`.thoth/brain.db`, `BRAIN.md`) keeps goal, decisions, handoffs, reviews and
   versions across sessions and across tools, and re-assigning a task resumes the agent's own session.
 
@@ -66,16 +106,19 @@ across your Claude and ChatGPT plans.
 
 ## Requirements
 
-- Hermes Agent ≥ 0.22
+- Hermes Agent ≥ 0.22.5
 - `git`
 - [Claude Code](https://docs.claude.com/en/docs/claude-code) (`claude`) and/or [Codex CLI](https://github.com/openai/codex) (`codex`), installed and **logged in**. Thoth uses your existing logins and plans; it never handles their credentials.
 
 ## Install
 
 ```bash
-hermes plugins install thoth
-hermes thoth doctor        # checks claude, codex and git
+hermes plugins install thoth                 # from the plugin catalog
+hermes plugins install cayden970207/thoth    # or straight from GitHub
+hermes thoth doctor                          # checks claude, codex and git
 ```
+
+Then open the **Thoth** page in Hermes Desktop's sidebar.
 
 ## Use it
 
@@ -110,7 +153,10 @@ page or a browser game gets an **Open preview** button on the Thoth page (and He
 `thoth_preview`). Thoth serves that task's folder on `127.0.0.1`, read-only, never hidden files such
 as `.env`. The **Outputs** view collects everything the team made that you can look at — images, video, sound,
 web pages and documents — and plays or shows each one in place. On the canvas, shipped work folds into
-the Main card once there is more than a little of it, so a long project stays readable.
+the Main card once there is more than a little of it (the count in its corner lays it out again), so a long
+project stays readable.
+
+![The Outputs view of a small game: the README, the page, and the sprites Codex made](docs/screenshots/outputs.png)
 
 For an app with a backend (say a CRM whose server also serves its pages), give the project a run command —
 `thoth_init(run="python3 backend/server.py --port {port}")`, approved by you. **Run & open** then starts the
@@ -122,7 +168,7 @@ cannot reinstall packages. Thoth links ignored `node_modules`, `.venv` and `venv
 checkout into each new worktree (agents can read them, not change them; the links are excluded from git).
 For a full install per task, give the project a setup command — `thoth_init(setup="npm ci")` — which
 Thoth runs in each new worktree before the agent starts, outside the sandbox and only after you approve
-it. `copy_env_files: true` also copies ignored `.env` files.
+it. Thoth never reads or copies `.env` files or other secrets into a worktree.
 
 **Hearing back in chat.** When an agent finishes, Thoth can tell the chat that started it, with one
 message for a batch of runs and nothing for results `thoth_wait` already returned. Hermes keeps this off
@@ -206,9 +252,13 @@ environment passthrough.
   free port for that task's folder, inside the Hermes process. It only answers GET/HEAD and never serves
   hidden paths. At most 8 run at once.
 - **Worktree setup**: links ignored dependency folders (`node_modules`, `.venv`, `venv`) from your main
-  checkout into new worktrees and adds exact-path lines for them to `.git/info/exclude`; with
-  `copy_env_files` it copies ignored `.env` files; with a project setup command (approved by you) it runs
-  that command in the new worktree as you, with network access.
+  checkout into new worktrees and adds exact-path lines for them to `.git/info/exclude`; with a project
+  setup command (approved by you) it runs that command in the new worktree as you, with network access.
+  It never reads or copies `.env` files.
+- **Connect buttons** on the Thoth page run, only when you click one, `claude mcp add thoth …` (this project
+  only) or `codex mcp add thoth …` (Codex's own config, all projects), so that tool can coordinate through
+  the bundled MCP server. Thoth changes no other setting of Claude Code or Codex, and reads neither one's
+  login: they sign in on their own.
 - No network calls of its own, no telemetry, no credential reads, no self-updating code.
 
 ## Development

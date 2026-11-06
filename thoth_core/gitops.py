@@ -122,12 +122,11 @@ def delete_branch(root: Path, branch: str) -> None:
 # -- a new worktree's environment ----------------------------------------------
 #
 # A worktree is a clean checkout: ignored folders such as node_modules or .venv
-# and ignored files such as .env are not there, and agents cannot download them
-# because their sandboxes have no network. Thoth links the folders (and, when
-# allowed, copies the env files) from the main checkout.
+# are not there, and agents cannot download them because their sandboxes have no
+# network. Thoth links those folders from the main checkout. It never reads or
+# copies .env files or other secrets.
 
 DEFAULT_DEPENDENCY_DIRS = ("node_modules", ".venv", "venv")
-ENV_FILE = re.compile(r"^\.env(\.[\w.-]+)?$")
 _EXCLUDE_HEADER = "# Thoth: dependency links inside task worktrees"
 
 
@@ -187,20 +186,6 @@ def link_dependencies(root: Path, worktree: Path, names: tuple[str, ...] | list[
         for rel in linked:
             (worktree / rel).symlink_to(root / rel, target_is_directory=True)
     return linked[:20]
-
-
-def copy_env_files(root: Path, worktree: Path) -> list[str]:
-    """Copy ignored .env files (never tracked or unignored ones) into the worktree. Returns what was copied."""
-    copied: list[str] = []
-    for entry in ignored_entries(root):
-        if entry.endswith("/") or not ENV_FILE.match(Path(entry).name):
-            continue
-        src, dst = root / entry, worktree / entry
-        if not src.is_file() or dst.exists() or not dst.parent.is_dir():
-            continue
-        dst.write_bytes(src.read_bytes())
-        copied.append(entry)
-    return copied[:20]
 
 
 def is_dirty(path: str | Path) -> bool:

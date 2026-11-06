@@ -383,13 +383,13 @@ def test_dependency_folders_are_linked_and_never_committed(repo):
     (repo / "node_modules" / "left-pad").mkdir(parents=True)
     (repo / "node_modules" / "left-pad" / "index.js").write_text("module.exports = 1\n")
     (repo / ".env").write_text("TOKEN=dev\n")
-    svc = Thoth(mcp_launcher=None, settings={"copy_env_files": True})
+    svc = Thoth(mcp_launcher=None)
     svc.init(str(repo))
     svc.plan(str(repo), [{"title": "Use the package", "agent": "codex"}])
     brain = Brain.open(repo)
     wt = _built(svc, brain, "T1", {"main.js": "require('left-pad')\n"}, "use it")
     assert (wt / "node_modules").is_symlink() and (wt / "node_modules" / "left-pad" / "index.js").exists()
-    assert (wt / ".env").read_text() == "TOKEN=dev\n"
+    assert not (wt / ".env").exists()  # secrets never leave the main checkout
     committed = gitops.git(wt, "show", "--name-only", "--format=", "HEAD").split()
     assert committed == ["main.js"] and not gitops.is_dirty(wt)
     assert any("node_modules" in n["body"] for n in brain.notes(task_id=1))

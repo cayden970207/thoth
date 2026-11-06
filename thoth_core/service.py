@@ -53,7 +53,6 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "inject_board": True,
     "link_dependencies": True,
     "dependency_dirs": list(gitops.DEFAULT_DEPENDENCY_DIRS),
-    "copy_env_files": False,
     "setup_timeout_seconds": 600,
 }
 
@@ -383,7 +382,7 @@ class Thoth:
 
     def _prepare_environment(self, brain: Brain, worktree: Path) -> list[str]:
         """Give a new worktree what a clean checkout lacks: the project's setup command, or links to its
-        dependency folders, and (when allowed) its .env files. Agents have no network to install them."""
+        dependency folders. Agents have no network to install them. Never .env files or other secrets."""
         notes: list[str] = []
         setup = (brain.meta().get("setup") or "").strip()
         if setup:
@@ -401,10 +400,6 @@ class Thoth:
             linked = gitops.link_dependencies(brain.root, worktree, tuple(self.settings.get("dependency_dirs") or gitops.DEFAULT_DEPENDENCY_DIRS))
             if linked:
                 notes.append(f"Linked from the main checkout (read-only for you, no network to reinstall): {', '.join(linked)}.")
-        if self.settings.get("copy_env_files"):
-            copied = gitops.copy_env_files(brain.root, worktree)
-            if copied:
-                notes.append(f"Copied {', '.join(copied)} from the main checkout.")
         return notes
 
     def _launch(self, brain: Brain, run_id: int, task: dict, driver, *, kind: str, prompt: str, session: str, cwd: Path, model: str = "", effort: str = "") -> None:
