@@ -16,15 +16,17 @@ from typing import Any
 
 from . import gitops
 from .agents import McpSpec, RunState, clean_env, driver_for
-from .brain import NOTE_KINDS, OPEN_RUN_STATUSES, Brain, BrainError, find_brain_root, parse_id, rid, tid
+from .brain import NOTE_KINDS, TASK_KINDS, OPEN_RUN_STATUSES, Brain, BrainError, find_brain_root, parse_id, rid, tid
 from .briefing import ago, board_lines, build_brief, parse_report, review_brief, strip_report
 from .runner import RunManager, kill_group, pid_alive
 
 logger = logging.getLogger(__name__)
 
-WORKERS = ("claude", "codex")
+WORKERS = ("claude", "codex", "hermes")  # hermes = the coordinator does the task itself
+CLI_WORKERS = ("claude", "codex")
 COORDINATORS = ("hermes", "claude", "codex")
 TERMINAL_RUN_STATUSES = ("done", "failed", "cancelled", "timeout", "lost")
+MAX_REPORT_DECISIONS = 3
 
 DEFAULT_SETTINGS: dict[str, Any] = {
     "default_agent": "claude",
@@ -33,11 +35,14 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "claude_model": "",
     "codex_model": "",
     "claude_permission_mode": "acceptEdits",
+    "claude_sandbox": True,
+    "lean_workers": True,
     "claude_allowed_tools": [],
     "run_timeout_seconds": 1800,
     "max_concurrent_runs": 3,
     "attach_mcp": True,
     "resume_sessions": True,
+    "max_review_rounds": 3,
     "remove_worktree_on_merge": True,
     "env_passthrough": [],
     "notify_on_complete": True,
@@ -57,6 +62,13 @@ def default_mcp_launcher(root: Path, agent: str, run_id: int, task_id: int) -> M
         command=sys.executable,
         args=["-I", str(server), "--project", str(root), "--as", agent, "--run", rid(run_id), "--task", tid(task_id)],
     )
+
+
+AGENT_NAMES = {"claude": "Claude Code", "codex": "Codex", "hermes": "Hermes"}
+
+
+def _name(agent: str) -> str:
+    return AGENT_NAMES.get(agent or "", agent or "an agent")
 
 
 def _other(agent: str) -> str:
@@ -111,6 +123,8 @@ class Thoth:
 
     def _sweep_orphans(self, brain: Brain) -> None:
         for run in brain.runs(open_only=True):
+            if run["agent"] == "hermes":  # the coordinator's own work has no process to lose
+                continue
             owner = run.get("owner_pid")
             if owner == os.getpid() or pid_alive(owner):
                 continue
@@ -145,6 +159,9 @@ class Thoth:
                     deps.append(created[pos - 1]["id"])
                 else:
                     deps.append(parse_id(dep, "T"))
+            kind = str(spec.get("kind") or "code").strip().lower()
+            if kind not in TASK_KINDS:
+                raise BrainError(f"Task #{index}: kind must be one of {', '.join(TASK_KINDS)}")
             created.append(
                 brain.add_task(
                     title=str(spec["title"]).strip(),
@@ -152,11 +169,13 @@ class Thoth:
                     agent=agent,
                     depends_on=deps,
                     actor=self.actor,
+                    kind=kind,
+                    role=str(spec.get("role") or "").strip()[:60],
                 )
             )
         return {"created": [self._task_brief(t) for t in created], "board": board_lines(brain)}
 
-    def update_task(self, project_dir: str, task: Any, *, title: str = "", detail: str = "", agent: str = "", status: str = "") -> dict:
+    def update_task(self, project_dir: str, task: Any, *, title: str = "", detail: str = "", agent: str = "", status: str = "", kind: str = "", role: str = "") -> dict:
         brain = self.open(project_dir)
         task_id = parse_id(task, "T")
         current = brain.task(task_id)
@@ -169,6 +188,12 @@ class Thoth:
             if agent not in WORKERS:
                 raise BrainError(f"agent must be one of {', '.join(WORKERS)}")
             fields["agent"] = agent
+        if kind:
+            if kind not in TASK_KINDS:
+                raise BrainError(f"kind must be one of {', '.join(TASK_KINDS)}")
+            fields["kind"] = kind
+        if role:
+            fields["role"] = role.strip()[:60]
         if status:
             if status not in ("todo", "cancelled"):
                 raise BrainError("Only 'todo' (reopen) or 'cancelled' can be set by hand")
@@ -192,6 +217,8 @@ class Thoth:
             raise BrainError(f"{current['ref']} is already {current['status']}")
         if current["status"] == "merged":
             raise BrainError(f"{current['ref']} is already merged; add a new task for follow-up work")
+        if agent == "hermes":
+            return self._assign_to_coordinator(brain, current, instructions)
         driver = self._driver(agent)
         self._check_capacity(brain)
         current = self._prepare_worktree(brain, current)
@@ -204,6 +231,33 @@ class Thoth:
         self._launch(brain, run["id"], current, driver, kind="build", prompt=prompt, session=session, cwd=Path(current["worktree"]))
         return {"run": run["ref"], "task": current["ref"], "agent": agent, "branch": current["branch"], "resumed_session": bool(session), "status": "running"}
 
+    def _assign_to_coordinator(self, brain: Brain, task: dict, instructions: str) -> dict:
+        """Hermes (or whoever coordinates) does this task itself, in the task worktree, then calls complete()."""
+        task = self._prepare_worktree(brain, task)
+        prompt = build_brief(brain, task, agent="hermes", instructions=instructions, has_mcp=False, self_run=True)
+        run = brain.add_run(task_id=task["id"], agent="hermes", kind="build", prompt=prompt, actor=self.actor)
+        brain.update_run(run["id"], status="running", started_at=time.time(), owner_pid=None, commit_before=gitops.head(Path(task["worktree"])), progress="Working on it")
+        brain.update_task(task["id"], status="running", agent="hermes")
+        brain.event("hermes", "run_started", f"hermes takes {task['ref']} {task['title']}", task_id=task["id"], run_id=run["id"])
+        return {
+            "run": run["ref"], "task": task["ref"], "agent": "hermes", "status": "running", "worktree": task["worktree"],
+            "next": f"Do this task yourself inside {task['worktree']} (write files there), then call thoth_complete with task={task['ref']}.",
+            "brief": prompt,
+        }
+
+    def complete(self, project_dir: str, task: Any, summary: str, outputs: list[str] | None = None, decisions: list[str] | None = None, handoff: str = "") -> dict:
+        """Finish a task the coordinator did itself: commit its worktree and record the result like any run."""
+        brain = self.open(project_dir)
+        current = brain.task(parse_id(task, "T"))
+        run = next((r for r in brain.runs(task_id=current["id"], open_only=True) if r["agent"] == "hermes"), None)
+        if run is None:
+            raise BrainError(f"{current['ref']} has no open Hermes run; assign it with agent='hermes' first")
+        report = {"status": "done", "summary": summary, "outputs": outputs or [], "decisions": decisions or [], "handoff": handoff}
+        state = RunState(final_text="THOTH_REPORT\n" + __import__("json").dumps(report), cwd=current["worktree"], progress=summary[:160])
+        self._finalize(brain, run["id"], state, 0, "")
+        final = brain.run(run["id"])
+        return self._run_brief(final, brain.task(current["id"]))
+
     def review(self, project_dir: str, task: Any, reviewer: str = "", instructions: str = "") -> dict:
         brain = self.open(project_dir)
         task_id = parse_id(task, "T")
@@ -213,8 +267,8 @@ class Thoth:
         if not current["worktree"] or not Path(current["worktree"]).exists():
             raise BrainError(f"{current['ref']} has no worktree to review")
         reviewer = (reviewer or _other(current["agent"] or "claude")).strip().lower()
-        if reviewer not in WORKERS:
-            raise BrainError(f"reviewer must be one of {', '.join(WORKERS)}")
+        if reviewer not in CLI_WORKERS:
+            raise BrainError(f"reviewer must be one of {', '.join(CLI_WORKERS)}")
         driver = self._driver(reviewer)
         self._check_capacity(brain)
         worktree = Path(current["worktree"])
@@ -283,7 +337,7 @@ class Thoth:
         brain.update_run(run_id, log_path=str(log_path), commit_before=gitops.head(cwd))
 
         def on_progress(state: RunState, extra: dict[str, Any]) -> None:
-            fields: dict[str, Any] = {"progress": state.progress, "activity": state.activity}
+            fields: dict[str, Any] = {"progress": state.progress, "activity": state.activity, "files": state.files(), "delegations": state.delegation_list()}
             if state.session_id:
                 fields["session_id"] = state.session_id
             fields.update(extra)
@@ -329,6 +383,8 @@ class Thoth:
         report = parse_report(state.final_text)
         summary = str(report.get("summary") or strip_report(state.final_text))[:2000]
         fields: dict[str, Any] = {
+            "files": state.files(),
+            "delegations": [{**d, "status": d["status"] if d["status"] != "running" else ("completed" if status == "done" else "cancelled")} for d in state.delegation_list()],
             "status": status,
             "exit_code": exit_code,
             "error": error or state.error if status != "done" else "",
@@ -353,6 +409,13 @@ class Thoth:
                 tip = gitops.head(worktree)
                 fields["commit_after"] = tip
                 fields["diffstat"] = gitops.diffstat(worktree, run["commit_before"] or task["base_commit"], tip)
+                changed = gitops.name_status(worktree, run["commit_before"] or task["base_commit"], tip)
+                outputs = [str(o) for o in _as_list(report.get("outputs"))]
+                fields["files"] = {
+                    "changed": changed,
+                    "read": [f for f in state.files_read if f not in {c["path"] for c in changed}][:80],
+                    "outputs": outputs[:40],
+                }
                 brain.update_task(task["id"], head_commit=tip)
                 commit = commit or (tip if tip != run["commit_before"] else "")
             except Exception as exc:
@@ -374,7 +437,22 @@ class Thoth:
             if str(report.get("status", "")).lower() == "blocked":
                 brain.add_note(kind="question", author=author, body=f"Blocked: {summary[:500]}", task_id=task["id"], run_id=run_id)
         else:
+            # A review must not change the task. Anything the reviewer left in the worktree
+            # (scratch scripts, test output) is discarded so it can't ride along in the next build commit.
+            try:
+                worktree = Path(task["worktree"])
+                if worktree.exists() and gitops.is_dirty(worktree):
+                    gitops.discard_changes(worktree)
+                    brain.event("thoth", "review_cleanup", f"discarded files {author} left in {task['ref']}'s worktree during review", task_id=task["id"], run_id=run_id)
+            except Exception as exc:
+                logger.warning("thoth: cleanup after review R%s failed: %s", run_id, exc)
             verdict = str(report.get("verdict") or "").lower()
+            blocking = [c for c in _as_list(report.get("comments")) if _severity(c) <= 2]
+            if verdict.startswith("change") and not blocking:
+                # Only polish was raised: it does not block the merge.
+                report["suggestions"] = _as_list(report.get("suggestions")) + _as_list(report.get("comments"))
+                report["comments"] = []
+                report["verdict"] = verdict = "approve"
             fields["report"] = report
             if status != "done":
                 new_status = "built"
@@ -387,10 +465,13 @@ class Thoth:
                 fields["error"] = "the reviewer did not give a verdict"
             brain.update_task(task["id"], status=new_status)
             comments = _as_list(report.get("comments"))
+            suggestions = _as_list(report.get("suggestions"))
             if comments or (status == "done" and verdict):
                 body = f"Review by {author} ({verdict or 'no verdict'}): {summary[:600]}"
                 if comments:
                     body += "\n" + "\n".join(f"  • {c}" for c in comments)
+                if suggestions:
+                    body += "\nOptional suggestions:\n" + "\n".join(f"  ◦ {c}" for c in suggestions[:6])
                 brain.add_note(kind="review", author=author, body=body, task_id=task["id"], run_id=run_id)
             for decision in _as_list(report.get("decisions")):
                 brain.add_note(kind="decision", author=author, body=decision, task_id=task["id"], run_id=run_id)
@@ -445,12 +526,16 @@ class Thoth:
 
     # -- versions ----------------------------------------------------------------
 
-    def merge(self, project_dir: str, task: Any) -> dict:
+    def merge(self, project_dir: str, task: Any, override: bool = False) -> dict:
         brain = self.open(project_dir)
         task_id = parse_id(task, "T")
         current = brain.task(task_id)
-        if current["status"] not in ("built", "approved"):
-            raise BrainError(f"{current['ref']} is {current['status']}; only built or approved tasks can be merged")
+        allowed = ("built", "approved", "changes") if override else ("built", "approved")
+        if current["status"] not in allowed:
+            hint = " (pass override to merge despite open review comments)" if current["status"] == "changes" else ""
+            raise BrainError(f"{current['ref']} is {current['status']}; only built or approved tasks can be merged{hint}")
+        if override and current["status"] == "changes":
+            brain.add_note(kind="decision", author=self.actor, body=f"Merged {current['ref']} with review comments still open, by the user's decision.", task_id=task_id)
         if not current["branch"]:
             raise BrainError(f"{current['ref']} has no branch")
         base = brain.meta().get("base_branch", "")
@@ -502,6 +587,10 @@ class Thoth:
         kind = (kind or "context").strip().lower()
         if kind not in NOTE_KINDS:
             raise BrainError(f"kind must be one of {', '.join(NOTE_KINDS)}")
+        if kind == "decision":
+            for existing in brain.notes(kinds=("decision",), limit=300):
+                if _same_point(body, existing["body"]):
+                    return {"note": f"N{existing['id']}", "kind": kind, "task": tid(existing.get("task_id")), "duplicate_of": f"{existing['author']}: {existing['body'][:160]}"}
         note = brain.add_note(kind=kind, author=author or self.actor, body=body, task_id=task_id, run_id=run_id)
         return {"note": f"N{note['id']}", "kind": kind, "task": tid(task_id)}
 
@@ -545,10 +634,94 @@ class Thoth:
             "coordinator": meta.get("coordinator", "hermes"),
             "base_branch": meta.get("base_branch", ""),
             "board": board_lines(brain),
+            "needs_you": [f"{n['title']} — {n['detail']} (next: {n['tool']} {n['task']})" for n in self.needs(project_dir)],
             "running": [self._run_brief(r, brain.task(r["task_id"])) for r in open_runs],
             "decisions": [f"{n['author']}: {n['body']}" for n in brain.notes(kinds=("decision",), limit=10)],
             "recent": [f"{ago(e['ts'])} {e['actor']}: {e['message']}" for e in brain.events(limit=10)],
+            "tokens": (lambda us: f"{us['total']['prompt']:,} prompt tokens across agents ({round(us['cache_rate'] * 100)}% cache hits); about {us['kept_out_tokens']:,} tokens of agent transcripts stayed out of the coordinator's context")(self.usage(brain)),
             "brain_file": str(brain.dir / "BRAIN.md"),
+        }
+
+    def needs(self, project_dir: str) -> list[dict]:
+        """What is waiting on a person (or the coordinator), most urgent first."""
+        brain = self.open(project_dir)
+        out: list[dict] = []
+        for t in brain.tasks():
+            runs = brain.runs(task_id=t["id"], limit=10)
+            last_review = next((r for r in runs if r["kind"] == "review" and r["status"] == "done"), None)
+            reviewer = last_review["agent"] if last_review else _other(t["agent"] or "claude")
+            last = runs[0] if runs else None
+            if t["status"] == "conflict":
+                out.append({"id": f"conflict-{t['ref']}", "kind": "conflict", "task": t["ref"], "who": t["agent"], "priority": 0,
+                            "title": f"Merge conflict on {t['ref']}", "detail": "The base branch is unchanged. Reconcile the branches, then merge again.", "tool": "thoth_assign"})
+            elif t["status"] == "approved":
+                out.append({"id": f"merge-{t['ref']}", "kind": "merge", "task": t["ref"], "who": reviewer, "priority": 1,
+                            "title": f"{t['ref']} is ready to merge", "detail": f"Approved by {_name(reviewer)} · {t['title']}", "tool": "thoth_merge"})
+            elif t["status"] == "changes":
+                comments = _as_list((last_review or {}).get("report", {}).get("comments")) if last_review else []
+                n = len(comments)
+                rounds = sum(1 for r in runs if r["kind"] == "review" and r["status"] == "done")
+                if rounds >= int(self.settings.get("max_review_rounds") or 3):
+                    out.append({"id": f"decide-{t['ref']}", "kind": "decide", "task": t["ref"], "who": reviewer, "priority": 1,
+                                "title": f"{rounds} review rounds on {t['ref']} — your call",
+                                "detail": f"{n} point{'s' if n != 1 else ''} still open. Merge as it is, or send it back once more.", "tool": "thoth_merge"})
+                else:
+                    out.append({"id": f"fix-{t['ref']}", "kind": "fix", "task": t["ref"], "who": reviewer, "priority": 2,
+                                "title": f"{n or 'Some'} change{'s' if n != 1 else ''} asked on {t['ref']}", "detail": f"{_name(t['agent'])} can pick them up in its last session", "tool": "thoth_assign"})
+            elif t["status"] == "failed":
+                err = (last or {}).get("error") or (last or {}).get("summary") or ""
+                out.append({"id": f"retry-{t['ref']}", "kind": "retry", "task": t["ref"], "who": t["agent"], "priority": 2,
+                            "title": f"{t['ref']} needs another try", "detail": err[:160] or "The last run did not finish", "tool": "thoth_assign"})
+            elif t["status"] == "built":
+                out.append({"id": f"review-{t['ref']}", "kind": "review", "task": t["ref"], "who": t["agent"], "priority": 3,
+                            "title": f"{t['ref']} is built and waiting for review", "detail": f"Ask {_name(_other(t['agent'] or 'claude'))} to review it", "tool": "thoth_review"})
+        out.sort(key=lambda n: n["priority"])
+        return out
+
+    def presence(self, brain: Brain) -> dict[str, dict]:
+        """What each agent is doing right now, from its open run."""
+        out = {a: {"busy": False, "say": "", "task": "", "kind": "", "run": ""} for a in ("hermes", "claude", "codex")}
+        for r in brain.runs(open_only=True):
+            out[r["agent"]] = {"busy": True, "say": r["progress"] or "Starting", "task": r["task_ref"], "kind": r["kind"], "run": r["ref"]}
+        return out
+
+    @staticmethod
+    def _usage(run: dict) -> dict[str, int]:
+        """Token use of one run in one shape (older runs stored the CLIs' raw fields)."""
+        u = run.get("usage") or {}
+        if "prompt_tokens" in u:
+            return {"prompt": int(u.get("prompt_tokens") or 0), "cached": int(u.get("cached_tokens") or 0), "output": int(u.get("output_tokens") or 0)}
+        if run["agent"] == "claude":
+            fresh, read = int(u.get("input_tokens") or 0), int(u.get("cache_read_input_tokens") or 0)
+            return {"prompt": fresh + read, "cached": read, "output": int(u.get("output_tokens") or 0)}
+        return {"prompt": int(u.get("input_tokens") or 0), "cached": int(u.get("cached_input_tokens") or 0), "output": int(u.get("output_tokens") or 0)}
+
+    def usage(self, brain: Brain) -> dict[str, Any]:
+        """Tokens per agent, cache hits, and how much agent work stayed out of the coordinator's context."""
+        import json as _json
+
+        per: dict[str, dict[str, int]] = {}
+        transcript_bytes = handed_bytes = 0
+        for run in brain.runs(limit=500):
+            if run["status"] in OPEN_RUN_STATUSES:
+                continue
+            u = self._usage(run)
+            a = per.setdefault(run["agent"], {"prompt": 0, "cached": 0, "output": 0, "runs": 0})
+            for k in ("prompt", "cached", "output"):
+                a[k] += u[k]
+            a["runs"] += 1
+            if run.get("log_path") and os.path.exists(run["log_path"]):
+                transcript_bytes += os.path.getsize(run["log_path"])
+                handed_bytes += len(_json.dumps(self._run_brief(run, brain.task(run["task_id"])), ensure_ascii=False))
+        total = {k: sum(a[k] for a in per.values()) for k in ("prompt", "cached", "output")}
+        return {
+            "per_agent": per,
+            "total": total,
+            "cache_rate": round(total["cached"] / total["prompt"], 3) if total["prompt"] else 0,
+            # What the coordinator would have had to read if it did the work itself, vs what it received.
+            "transcript_bytes": transcript_bytes,
+            "handed_bytes": handed_bytes,
+            "kept_out_tokens": max(0, (transcript_bytes - handed_bytes) // 4),
         }
 
     def snapshot(self, project_dir: str) -> dict:
@@ -564,6 +737,9 @@ class Thoth:
             "runs": [{k: v for k, v in r.items() if k != "prompt"} for r in runs],
             "notes": brain.notes(limit=60),
             "events": brain.events(limit=80),
+            "needs": self.needs(project_dir),
+            "agents": self.presence(brain),
+            "usage": self.usage(brain),
             "now": time.time(),
         }
 
@@ -592,6 +768,13 @@ class Thoth:
             "progress": run["progress"],
             "activity": run["activity"],
         }
+        files = run.get("files") or {}
+        if files.get("changed"):
+            out["files_changed"] = [f"{c['status']} {c['path']}" for c in files["changed"][:20]]
+        if files.get("outputs"):
+            out["outputs"] = files["outputs"][:20]
+        if run.get("delegations"):
+            out["delegated"] = [f"{d.get('role') or 'sub-agent'}: {d.get('title') or ''} ({d.get('status')})" for d in run["delegations"][:10]]
         if run["status"] in TERMINAL_RUN_STATUSES:
             out["summary"] = run["summary"]
             if run["error"]:
@@ -608,19 +791,41 @@ class Thoth:
         return out
 
 
-def _new_only(brain: Brain, run_id: int, kind: str, items: list[str]) -> list[str]:
-    """Drop report items the agent already recorded through the MCP server during this run."""
+def _severity(comment: str) -> int:
+    """P0..P3 from a "[P2] ..." tag; untagged comments count as blocking (P2)."""
+    import re
+
+    m = re.search(r"\[?\bP([0-3])\b\]?", comment[:12])
+    return int(m.group(1)) if m else 2
+
+
+def _norm(text: str) -> str:
+    return " ".join("".join(ch if ch.isalnum() else " " for ch in text.lower()).split())
+
+
+def _same_point(a: str, b: str) -> bool:
+    """True when two notes say the same thing (rewording, one contains the other, or mostly the same words)."""
     import difflib
 
-    seen = [n["body"].lower() for n in brain.notes(kinds=(kind,), limit=200) if n.get("run_id") == run_id]
+    a, b = _norm(a), _norm(b)
+    if not a or not b:
+        return False
+    if a in b or b in a or difflib.SequenceMatcher(None, a, b).ratio() > 0.72:
+        return True
+    wa, wb = set(a.split()), set(b.split())
+    return len(wa & wb) / max(1, min(len(wa), len(wb))) > 0.8
+
+
+def _new_only(brain: Brain, run_id: int, kind: str, items: list[str]) -> list[str]:
+    """Drop report items that repeat a note already in the brain, from any agent or run."""
+    seen = [n["body"] for n in brain.notes(kinds=(kind,), limit=300)]
     fresh = []
     for item in items:
-        low = item.lower()
-        if any(difflib.SequenceMatcher(None, low, s).ratio() > 0.75 or low in s or s in low for s in seen):
+        if any(_same_point(item, s) for s in seen):
             continue
         fresh.append(item)
-        seen.append(low)
-    return fresh
+        seen.append(item)
+    return fresh[:MAX_REPORT_DECISIONS]
 
 
 def _as_list(value: Any) -> list[str]:

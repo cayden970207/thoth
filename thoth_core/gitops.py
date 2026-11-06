@@ -132,6 +132,25 @@ def commit_all(worktree: Path, message: str) -> str | None:
     return head(worktree)
 
 
+def discard_changes(worktree: Path) -> None:
+    """Reset tracked files to HEAD and delete untracked ones (never ignored files)."""
+    git(worktree, "reset", "--hard", "HEAD")
+    git(worktree, "clean", "-fd")
+
+
+def name_status(path: str | Path, base: str, tip: str = "HEAD") -> list[dict]:
+    """Files changed between two commits: [{path, status}] with status A, M, D or R."""
+    if not base:
+        return []
+    out = git(path, "diff", "--name-status", "-M", f"{base}..{tip}", check=False)
+    files = []
+    for line in out.splitlines():
+        parts = line.split("\t")
+        if len(parts) >= 2:
+            files.append({"path": parts[-1], "status": parts[0][:1]})
+    return files[:200]
+
+
 def diffstat(path: str | Path, base: str, tip: str = "HEAD") -> str:
     if not base:
         return ""

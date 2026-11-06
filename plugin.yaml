@@ -29,6 +29,7 @@ provides_tools:
   - thoth_cancel
   - thoth_update_task
   - thoth_coordinator
+  - thoth_complete
 
 provides_hooks:
   - pre_tool_call
@@ -47,6 +48,16 @@ config_schema:
     choices: [acceptEdits, default, plan]
     label: Claude Code permission mode for build runs
     description: acceptEdits lets Claude edit files in the task worktree; shell commands still need the allow-list below.
+  claude_sandbox:
+    type: bool
+    default: true
+    label: Run Claude Code's shell commands in its OS sandbox
+    description: Lets Claude run tests without prompts while writes stay inside the task worktree (macOS and Linux). Same footing as Codex's workspace-write sandbox.
+  lean_workers:
+    type: bool
+    default: true
+    label: Lean workers (fewer tokens per call)
+    description: Agents start without your personal plugins, hooks, skills and extra MCP servers (Claude Code) or your config.toml (Codex). Measured 46% fewer prompt tokens per call for Claude Code and 24% for Codex.
   claude_allowed_tools:
     type: list
     default: []
@@ -85,6 +96,11 @@ config_schema:
     default: true
     label: Give agents the Thoth tools while they work
     description: Starts the bundled MCP server for each run so agents can read the board and record decisions.
+  max_review_rounds:
+    type: int
+    default: 3
+    label: Review rounds before Thoth asks you to decide
+    description: After this many reviews that still ask for changes, Needs you offers to merge as it is or send it back again.
   resume_sessions:
     type: bool
     default: true

@@ -26,6 +26,21 @@ shared brain: a task board, decisions, handoffs, run history and a git branch pe
 6. **Merge in dependency order.** Merging a task built on another also merges that one.
 7. **Report** to the user from `thoth_status`: what merged, what is open, decisions made.
 
+## Not only code
+
+Give every task a `kind` (code, asset, doc, research, design, qa) and a `role`, and chain them with
+`depends_on` so files flow forward. A game, for example:
+
+1. `codex` · asset · **Art pipeline** — generate sprites with its image tool, size them with `magick`,
+   write `assets/manifest.json`.
+2. `claude` · code · **Game developer** (after 1) — builds the game from those files; it starts on
+   task 1's branch, so the assets are already in its worktree.
+3. `hermes` · doc · **Producer** (after 2) — you write the README yourself: `thoth_assign` with
+   agent `hermes`, work in the worktree it returns, then `thoth_complete` with your outputs.
+
+Agents may hand parts of a task to their own sub-agents (Claude's Agent tool, Codex's spawn_agent);
+Thoth records each delegation and shows it to the user.
+
 ## Rules
 
 - Never assign the same task twice at once; check `thoth_status` when unsure.

@@ -54,7 +54,7 @@ def call(svc: Thoth, name: str, args: dict[str, Any], default_project: Callable[
     if name == "thoth_note":
         return svc.note(project, str(args.get("kind") or "context"), str(args.get("body") or ""), task=args.get("task"), run=args.get("run"))
     if name == "thoth_merge":
-        return svc.merge(project, args.get("task"))
+        return svc.merge(project, args.get("task"), override=bool(args.get("override")))
     if name == "thoth_context":
         return svc.context(project, task=args.get("task"), agent=svc.actor)
     if name == "thoth_cancel":
@@ -67,6 +67,14 @@ def call(svc: Thoth, name: str, args: dict[str, Any], default_project: Callable[
             detail=str(args.get("detail") or ""),
             agent=str(args.get("agent") or ""),
             status=str(args.get("status") or ""),
+            kind=str(args.get("kind") or ""),
+            role=str(args.get("role") or ""),
+        )
+    if name == "thoth_complete":
+        return svc.complete(
+            project, args.get("task"), str(args.get("summary") or ""),
+            outputs=[str(o) for o in args.get("outputs") or []], decisions=[str(x) for x in args.get("decisions") or []],
+            handoff=str(args.get("handoff") or ""),
         )
     if name == "thoth_coordinator":
         result = svc.set_coordinator(project, str(args.get("agent") or ""))

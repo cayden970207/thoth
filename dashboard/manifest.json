@@ -1,0 +1,7 @@
+{
+  "name": "thoth",
+  "label": "Thoth",
+  "description": "Shared brain for Claude Code, Codex and Hermes: board, live agents, reviews and versions",
+  "version": "0.1.0",
+  "api": "plugin_api.py"
+}

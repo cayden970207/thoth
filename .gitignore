@@ -3,3 +3,4 @@ __pycache__/
 .pytest_cache/
 .thoth/
 .DS_Store
+.claude/

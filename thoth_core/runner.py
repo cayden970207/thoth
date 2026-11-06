@@ -138,7 +138,7 @@ class RunManager:
         threading.Thread(target=watchdog, name=f"thoth-watchdog-R{run_id}", daemon=True).start()
 
         def pump() -> None:
-            state = RunState()
+            state = RunState(cwd=str(cwd))
             last_flush = 0.0
             exit_code: int | None = None
             error = ""

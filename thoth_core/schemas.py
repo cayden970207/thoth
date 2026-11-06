@@ -12,6 +12,11 @@ _PROJECT = {
 }
 _TASK = {"type": "string", "description": "Task id, e.g. T3"}
 _AGENT = {"type": "string", "enum": ["claude", "codex"], "description": "claude = Claude Code CLI, codex = Codex CLI"}
+_WORKER = {"type": "string", "enum": ["claude", "codex", "hermes"],
+           "description": "claude = Claude Code CLI, codex = Codex CLI (can also generate and process images), hermes = the coordinator does it itself"}
+_KIND = {"type": "string", "enum": ["code", "asset", "doc", "research", "design", "qa"],
+         "description": "What the task produces. Not only code: asset (images, sprites, audio), doc, research, design, qa"}
+_ROLE = {"type": "string", "description": "The role the agent plays on this task, e.g. Art pipeline, Game developer, Level designer, QA"}
 
 TOOLS: dict[str, tuple[str, dict]] = {
     "thoth_init": (
@@ -27,9 +32,11 @@ TOOLS: dict[str, tuple[str, dict]] = {
         },
     ),
     "thoth_plan": (
-        "Add tasks to the shared board. Split the goal into tasks that can run in parallel where possible and give each "
-        "one to the agent that suits it (claude: UI, product sense, refactors, docs; codex: algorithms, tests, scripts, "
-        "careful edits). Every task gets its own branch and worktree when it starts.",
+        "Add tasks to the shared board. Work is not only code: give each task a kind (code, asset, doc, research, design, qa) "
+        "and a role, and give it to the agent that suits it (claude: product, UI, game or app building, docs, wide-context work; "
+        "codex: image generation and processing, algorithms, tests, scripts, careful edits; hermes: things you do yourself). "
+        "Split for parallel work and use depends_on to pass one task's files to the next (e.g. assets -> the game that uses them). "
+        "Every task gets its own branch and worktree when it starts.",
         {
             "type": "object",
             "properties": {
@@ -42,7 +49,9 @@ TOOLS: dict[str, tuple[str, dict]] = {
                         "properties": {
                             "title": {"type": "string", "description": "Short imperative title"},
                             "detail": {"type": "string", "description": "Full instructions and acceptance criteria"},
-                            "agent": _AGENT,
+                            "agent": _WORKER,
+                            "kind": _KIND,
+                            "role": _ROLE,
                             "depends_on": {
                                 "type": "array",
                                 "items": {"type": ["string", "integer"]},
@@ -66,7 +75,7 @@ TOOLS: dict[str, tuple[str, dict]] = {
             "properties": {
                 "project": _PROJECT,
                 "task": _TASK,
-                "agent": _AGENT,
+                "agent": _WORKER,
                 "instructions": {"type": "string", "description": "Extra instructions for this run only"},
             },
             "required": ["task"],
@@ -120,7 +129,7 @@ TOOLS: dict[str, tuple[str, dict]] = {
     "thoth_merge": (
         "Merge a built or approved task's branch into the base branch (git merge --no-ff). Conflicts are aborted and "
         "reported, leaving the base branch unchanged. The merge commit is recorded as a version in the brain.",
-        {"type": "object", "properties": {"project": _PROJECT, "task": _TASK}, "required": ["task"]},
+        {"type": "object", "properties": {"project": _PROJECT, "task": _TASK, "override": {"type": "boolean", "description": "Merge even though the last review still asks for changes. Only when the user decided so."}}, "required": ["task"]},
     ),
     "thoth_context": (
         "Get the full brief an agent would receive for a task (or the whole BRAIN.md when no task is given).",
@@ -139,10 +148,28 @@ TOOLS: dict[str, tuple[str, dict]] = {
                 "task": _TASK,
                 "title": {"type": "string"},
                 "detail": {"type": "string"},
-                "agent": _AGENT,
+                "agent": _WORKER,
+                "kind": _KIND,
+                "role": _ROLE,
                 "status": {"type": "string", "enum": ["todo", "cancelled"]},
             },
             "required": ["task"],
+        },
+    ),
+    "thoth_complete": (
+        "Finish a task you (the coordinator) did yourself after thoth_assign with agent='hermes': Thoth commits the task "
+        "worktree as a version and records your summary, the files you produced and any decisions for the team.",
+        {
+            "type": "object",
+            "properties": {
+                "project": _PROJECT,
+                "task": _TASK,
+                "summary": {"type": "string"},
+                "outputs": {"type": "array", "items": {"type": "string"}, "description": "Files you produced, e.g. [\"assets/logo.png — game logo\"]"},
+                "decisions": {"type": "array", "items": {"type": "string"}},
+                "handoff": {"type": "string"},
+            },
+            "required": ["task", "summary"],
         },
     ),
     "thoth_coordinator": (
@@ -175,4 +202,5 @@ EMOJI = {
     "thoth_cancel": "🛑",
     "thoth_update_task": "📝",
     "thoth_coordinator": "👑",
+    "thoth_complete": "✅",
 }

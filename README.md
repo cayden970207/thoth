@@ -35,6 +35,35 @@ to Claude Code or Codex at any time.
 | One agent checks its own work | **Cross-review**: the other agent reviews the diff read-only and returns approve/changes with comments. Re-assigning a task resumes the original agent's session with the review comments in its brief. |
 | Stuck with one coordinator | `thoth_coordinator` hands the coordinator role to Claude Code or Codex; they drive the same brain through the Thoth MCP server. |
 
+## Not only code
+
+Tasks have a **kind** (code, asset, doc, research, design, qa) and a **role**, and `depends_on`
+passes one task's files to the next. Codex can generate and process images (its image tool plus
+ImageMagick), Claude Code builds, and Hermes can take a task itself (`thoth_assign` to `hermes`,
+then `thoth_complete`). The Thoth page shows what every agent read, changed and produced (images as
+thumbnails), which files moved between tasks, and every sub-agent an agent delegated to.
+
+## Context, tokens and memory
+
+Measured on real runs (see `thoth_status` → `tokens`, or the Team activity card):
+
+- **The coordinator stays small.** Hermes receives each run's summary, diffstat and verdict, not the
+  transcript. On the tip-calculator demo the agents' transcripts were 674 KB; Hermes received 9.6 KB
+  (98.6 % kept out, about 166k tokens).
+- **Every agent starts focused.** A run gets a 2–18 KB brief (goal, decisions, handoffs, review
+  comments, the files its dependencies produced) instead of the whole conversation.
+- **Lean workers** (on by default) start agents without your personal plugins, hooks, skills and extra
+  MCP servers: one call's fixed prompt drops from 46.8k to 25.2k tokens for Claude Code and from 35.7k
+  to 27.1k for Codex. Every call re-sends that prefix, so a 10–30 call run saves 200k–600k tokens.
+- **Caching does the rest:** 82–95 % of prompt tokens in our runs were cache hits.
+- **Memory:** the brain (`.thoth/brain.db`, `BRAIN.md`) keeps goal, decisions, handoffs, reviews and
+  versions across sessions and across tools, and re-assigning a task resumes the agent's own session.
+
+What it does not do: total tokens across all agents are not lower than one agent doing everything —
+each agent pays its own fixed prompt and cross-review reads the diff again. The gain is that no single
+context has to hold everything, the expensive coordinator context stays tiny, and the work is spread
+across your Claude and ChatGPT plans.
+
 ## Requirements
 
 - Hermes Agent ≥ 0.22
@@ -110,9 +139,14 @@ environment passthrough.
   They run under **your** Claude Code / Codex login and plan, talk to Anthropic / OpenAI servers,
   and use your usage allowance.
 - **Permissions it gives them** (never chosen by a model):
-  build runs — Claude Code `--permission-mode acceptEdits` (file edits; shell only from read-only git
-  commands plus your `claude_allowed_tools`), Codex `--sandbox workspace-write` (Codex's OS sandbox:
-  writes only inside the worktree); review runs — read-only for both. Thoth never passes any
+  build runs — Claude Code `--permission-mode acceptEdits` with its OS sandbox on
+  (`sandbox.enabled`, `autoAllowBashIfSandboxed`, `allowUnsandboxedCommands: false`: shell commands such
+  as tests run without prompts but can only write inside the worktree and temp folders; turn it off
+  with `claude_sandbox: false`, after which shell commands are limited to read-only git commands plus
+  your `claude_allowed_tools`), Codex `--sandbox workspace-write` (Codex's OS sandbox: writes only
+  inside the worktree); review runs — no edit tools for Claude Code, `--sandbox read-only` for Codex.
+  Anything a reviewer leaves in the worktree is discarded (`git reset --hard` + `git clean -fd` in that
+  task's worktree only) so it can't slip into the next build commit. Thoth never passes any
   "skip permissions" or "bypass sandbox" flag.
 - **Pre-approves its own three worker tools inside Codex runs**: `codex exec` cannot ask anyone, so
   the run-scoped Thoth MCP server is started with `default_tools_approval_mode="approve"`. In worker
@@ -141,3 +175,9 @@ hermes plugins doctor . --ci
 (`__init__.py`) and the MCP server (`mcp_server.py`).
 
 MIT License.
+
+## Trademarks
+
+The Claude, Codex (OpenAI) and Hermes marks on the Thoth page only identify which tool did what. They come from the
+vendors' own packages (Anthropic's Claude Code extension, OpenAI's Codex extension and Hermes Agent's assets) and
+remain trademarks of their owners. Thoth is an independent community plugin, not affiliated with Anthropic or OpenAI.

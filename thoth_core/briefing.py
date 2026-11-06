@@ -54,7 +54,8 @@ def board_lines(brain: "Brain") -> list[str]:
         deps = f" (after {', '.join(tid(d) for d in t['depends_on'])})" if t["depends_on"] else ""
         commit = f" @{t['head_commit'][:7]}" if t["head_commit"] else ""
         lines.append(
-            f"{_STATUS_ICON.get(t['status'], '?')} {t['ref']} [{t['status']}] {t['agent'] or 'unassigned'}: {t['title']}{deps}{commit}"
+            f"{_STATUS_ICON.get(t['status'], '?')} {t['ref']} [{t['status']}] {t['agent'] or 'unassigned'}"
+            f"{' as ' + t['role'] if t.get('role') else ''}{' (' + t['kind'] + ')' if t.get('kind', 'code') != 'code' else ''}: {t['title']}{deps}{commit}"
         )
     return lines or ["(no tasks yet)"]
 
@@ -73,7 +74,9 @@ def _tools_section(has_mcp: bool) -> str:
         "- `thoth_status` — the live board and recent activity\n"
         "- `thoth_context` — the full brief for any task\n"
         "- `thoth_note` — record a decision, a handoff, a risk or a question for the others "
-        "(decisions you record are shown to every agent that runs after you)\n"
+        "(decisions you record are shown to every agent that runs after you)\n\n"
+        "Record a decision only when another agent must follow it (an interface, a file layout, a rule). "
+        "One sentence each, no more than 25 words, and never restate a decision already listed above.\n"
     )
 
 
@@ -82,15 +85,17 @@ def _report_instructions(kind: str) -> str:
         example = {
             "verdict": "approve | changes",
             "summary": "one paragraph on what you checked and what you found",
-            "comments": ["each concrete change the author must make, with file and line"],
+            "comments": ["[P1] file:line — a blocking problem the author must fix"],
+            "suggestions": ["[P3] file:line — optional polish that does not block the merge"],
             "decisions": [],
         }
     else:
         example = {
             "status": "done | blocked",
             "summary": "one paragraph on what you built and how",
-            "decisions": ["design or API decisions other agents must follow"],
+            "decisions": ["at most 3 NEW rules other agents must follow, one short sentence each (omit ones already recorded)"],
             "handoff": "what the next agent needs to know (empty if nothing)",
+            "outputs": ["path/to/file — what it is (every file you produced for others to use)"],
             "risks": ["anything fragile or untested"],
         }
     return (
@@ -100,7 +105,32 @@ def _report_instructions(kind: str) -> str:
     )
 
 
-def build_brief(brain: "Brain", task: dict, *, agent: str, instructions: str = "", has_mcp: bool = False, resumed: bool = False) -> str:
+KIND_GUIDE = {
+    "code": "Write working code and verify it by running it where you can.",
+    "asset": (
+        "This is an asset task: produce the files themselves (images, sprites, audio, data). Put them under "
+        "`assets/` unless the task names another place, use clear file names, and keep them at the sizes the task asks for. "
+        "Codex can create images with its image generation tool and process them with ImageMagick (`magick`) or Python; "
+        "check every file you produce (size, format, transparency) before you finish."
+    ),
+    "doc": "This is a writing task: produce the document files (Markdown unless the task says otherwise).",
+    "research": "This is a research task: write your findings to a Markdown file under `notes/` with sources, then summarize.",
+    "design": "This is a design task: produce the design files (specs, mockups, style guides) the builders will follow.",
+    "qa": "This is a QA task: exercise the product, write what you found to `notes/qa.md`, and fix nothing unless asked.",
+}
+
+
+def _dep_files(brain: "Brain", dep_id: int) -> list[str]:
+    """Files a dependency produced (its declared outputs, else what its builds changed)."""
+    outputs, changed = [], []
+    for r in reversed(brain.runs(task_id=dep_id, limit=20)):
+        f = r.get("files") or {}
+        outputs += [o for o in f.get("outputs") or [] if o not in outputs]
+        changed += [c["path"] for c in f.get("changed") or [] if c.get("status") != "D" and c["path"] not in changed]
+    return (outputs or changed)[:25]
+
+
+def build_brief(brain: "Brain", task: dict, *, agent: str, instructions: str = "", has_mcp: bool = False, resumed: bool = False, self_run: bool = False) -> str:
     meta = brain.meta()
     coordinator = meta.get("coordinator", "hermes")
     parts: list[str] = []
@@ -118,6 +148,10 @@ def build_brief(brain: "Brain", task: dict, *, agent: str, instructions: str = "
         )
         if meta.get("goal"):
             parts.append(f"## Project goal\n{meta['goal']}")
+    role = (task.get("role") or "").strip()
+    kind = task.get("kind") or "code"
+    if role or kind != "code":
+        parts.append("## Your role\n" + (f"On this task you are the team's **{role}**. " if role else "") + KIND_GUIDE.get(kind, ""))
     body = task.get("detail") or task["title"]
     if instructions.strip():
         body += f"\n\nCoordinator's instructions for this run:\n{instructions.strip()}"
@@ -145,10 +179,23 @@ def build_brief(brain: "Brain", task: dict, *, agent: str, instructions: str = "
         last = brain.runs(task_id=dep_id, limit=1)
         summary = last[0]["summary"] if last else ""
         dep_lines.append(f"- {dep['ref']} {dep['title']} [{dep['status']}] on `{dep['branch']}`: {summary or '(no summary)'}")
+        files = _dep_files(brain, dep_id)
+        if files:
+            dep_lines.append("  Files it produced (already in your worktree when it is your base, otherwise on its branch):\n" + "\n".join(f"    - {f}" for f in files))
     if dep_lines:
         parts.append("## What your dependencies produced\n" + "\n".join(dep_lines))
     parts.append(_tools_section(has_mcp))
-    parts.append(_report_instructions("build"))
+    if self_run:
+        parts.append(
+            "## How to finish\nYou are doing this task yourself, not through a CLI agent. Work inside the worktree path above, "
+            "then call `thoth_complete` with this task id, a summary, the `outputs` you produced and any `decisions`."
+        )
+    else:
+        parts.append(
+            "## Delegating\nIf part of this task is better done by a specialist, you may hand it to your own sub-agents "
+            "(Claude Code: the Agent/Task tool; Codex: spawn_agent). Thoth shows them to the team, so give each a clear role."
+        )
+        parts.append(_report_instructions("build"))
     return "\n\n".join(p for p in parts if p)
 
 
@@ -176,8 +223,17 @@ def review_brief(brain: "Brain", task: dict, *, reviewer: str, diff_text: str, l
         f"Commits since `{task['base_ref']}`:\n```\n{log_text or '(none)'}\n```\n"
         f"Diff:\n```diff\n{diff_text or '(empty diff)'}\n```\n"
         "Check correctness, edge cases, consistency with the team decisions and with the rest of the code. "
-        "Read surrounding files when you need more context. Ask for changes only for real problems."
+        "Read surrounding files when you need more context, and run the code when that settles a question.\n\n"
+        "Severity: P0 breaks the product, P1 a user will hit it, P2 a realistic edge case gives a wrong result, "
+        "P3 polish or a far-fetched input. Put only P0–P2 in `comments`, and answer `changes` only if there is at "
+        "least one. P3 items go in `suggestions` and do not block the merge."
     )
+    rounds = sum(1 for r in brain.runs(task_id=task["id"], limit=50) if r["kind"] == "review" and r["status"] == "done")
+    if rounds:
+        parts.append(
+            f"## Earlier reviews\nThis is review round {rounds + 1}. Earlier comments are in the notes above. "
+            "Check whether they were fixed; do not raise new P3-level points as blocking."
+        )
     parts.append(_tools_section(has_mcp))
     parts.append(_report_instructions("review"))
     return "\n\n".join(p for p in parts if p)

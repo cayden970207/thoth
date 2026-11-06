@@ -111,8 +111,30 @@ CREATE INDEX IF NOT EXISTS idx_notes_task ON notes(task_id);
 """
 
 
+TASK_KINDS = ("code", "asset", "doc", "research", "design", "qa")
+
+# Columns added after the first release; created on open for older brains.
+_MIGRATIONS = {
+    "tasks": [("kind", "TEXT NOT NULL DEFAULT 'code'"), ("role", "TEXT NOT NULL DEFAULT ''")],
+    "runs": [("files", "TEXT NOT NULL DEFAULT '{}'"), ("delegations", "TEXT NOT NULL DEFAULT '[]'")],
+}
+
+
 class BrainError(Exception):
     """A user-facing error: bad id, wrong state, missing brain."""
+
+
+# Hosts (the Hermes plugin) register callbacks here to hear about every change,
+# e.g. to push a live update to Hermes Desktop. Called with (project_root, event_type).
+CHANGE_LISTENERS: list = []
+
+
+def _notify_change(root: Path, type_: str) -> None:
+    for listener in list(CHANGE_LISTENERS):
+        try:
+            listener(str(root), type_)
+        except Exception:
+            pass
 
 
 def tid(n: int | None) -> str:
@@ -189,6 +211,11 @@ class Brain:
         # executescript() manages its own transaction, so it must not run inside _tx().
         with self._conn() as db:
             db.executescript(_SCHEMA)
+            for table, columns in _MIGRATIONS.items():
+                have = {row["name"] for row in db.execute(f"PRAGMA table_info({table})")}
+                for name, decl in columns:
+                    if name not in have:
+                        db.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
 
     @contextmanager
     def _conn(self) -> Iterator[sqlite3.Connection]:
@@ -224,16 +251,16 @@ class Brain:
 
     # -- tasks -------------------------------------------------------------------
 
-    def add_task(self, *, title: str, detail: str, agent: str, depends_on: list[int], actor: str) -> dict:
+    def add_task(self, *, title: str, detail: str, agent: str, depends_on: list[int], actor: str, kind: str = "code", role: str = "") -> dict:
         now = time.time()
         with self._tx() as db:
             for dep in depends_on:
                 if db.execute("SELECT 1 FROM tasks WHERE id=?", (dep,)).fetchone() is None:
                     raise BrainError(f"Dependency {tid(dep)} does not exist")
             cur = db.execute(
-                "INSERT INTO tasks(title, detail, agent, depends_on, created_by, created_at, updated_at)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (title, detail, agent, json.dumps(depends_on), actor, now, now),
+                "INSERT INTO tasks(title, detail, agent, depends_on, created_by, created_at, updated_at, kind, role)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (title, detail, agent, json.dumps(depends_on), actor, now, now, kind if kind in TASK_KINDS else "code", role),
             )
             task_id = int(cur.lastrowid)
         self.event(actor, "task_added", f"{tid(task_id)} {title} -> {agent or 'unassigned'}", task_id=task_id)
@@ -305,7 +332,7 @@ class Brain:
     def update_run(self, run_id: int, **fields: Any) -> None:
         if not fields:
             return
-        for key in ("report", "usage"):
+        for key in ("report", "usage", "files", "delegations"):
             if key in fields and not isinstance(fields[key], str):
                 fields[key] = json.dumps(fields[key], ensure_ascii=False)
         cols = ", ".join(f"{k}=?" for k in fields)
@@ -372,6 +399,7 @@ class Brain:
             self.write_snapshot()
         except Exception:
             pass
+        _notify_change(self.root, type_)
 
     def events(self, *, limit: int = 40, since_id: int = 0) -> list[dict]:
         with self._conn() as db:
@@ -408,11 +436,11 @@ def _task_dict(row: sqlite3.Row) -> dict:
 
 def _run_dict(row: sqlite3.Row) -> dict:
     data = dict(row)
-    for key in ("report", "usage"):
+    for key, empty in (("report", "{}"), ("usage", "{}"), ("files", "{}"), ("delegations", "[]")):
         try:
-            data[key] = json.loads(data.get(key) or "{}")
+            data[key] = json.loads(data.get(key) or empty)
         except ValueError:
-            data[key] = {}
+            data[key] = json.loads(empty)
     data["ref"] = rid(data["id"])
     data["task_ref"] = tid(data["task_id"])
     return data

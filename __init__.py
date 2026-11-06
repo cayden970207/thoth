@@ -96,11 +96,24 @@ class ThothPlugin:
 
     def remember(self, project: str) -> None:
         root = find_brain_root(project) if project else None
-        if root is not None:
-            try:
-                self.ctx.state.set("last_project", str(root))
-            except Exception:
-                pass
+        if root is None:
+            return
+        try:
+            self.ctx.state.set("last_project", str(root))
+        except Exception:
+            pass
+        # The Desktop page only serves projects listed here (most recent first).
+        try:
+            from plugins.plugin_storage import plugin_data_dir
+
+            path = plugin_data_dir("thoth") / "projects.json"
+            known = json.loads(path.read_text(encoding="utf-8")) if path.exists() else []
+            known = [str(root)] + [p for p in known if p != str(root)]
+            tmp = path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(known[:20], indent=2), encoding="utf-8")
+            tmp.replace(path)
+        except Exception:
+            logger.debug("thoth: could not record the project", exc_info=True)
 
     # -- approval ----------------------------------------------------------------
 
@@ -110,11 +123,13 @@ class ThothPlugin:
         if name == "thoth_merge":
             base = brain.meta().get("base_branch", "")
             text = (
-                f"Thoth: merge {task['ref']} \"{task['title']}\" (by {task['agent']}, status {task['status']}) "
+                f"Thoth: merge {task['ref']} \"{task['title']}\" (by {task['agent']}, status {task['status']}"
+                + (", OVERRIDING the open review comments" if args.get("override") else "")
+                + ") "
                 f"from branch {task['branch']} into {base} in {brain.root} with git merge --no-ff. "
                 "Conflicts are aborted and leave the base branch unchanged."
             )
-            key = f"thoth:merge:{_short_hash(str(brain.root))}"
+            key = f"thoth:merge{':override' if args.get('override') else ''}:{_short_hash(str(brain.root))}"
             return text, key
         if name == "thoth_review":
             agent = (args.get("reviewer") or ("codex" if task["agent"] == "claude" else "claude")).lower()
@@ -143,12 +158,26 @@ class ThothPlugin:
         key = f"thoth:{kind}:{agent}:{_short_hash(str(brain.root))}"
         return text, key
 
+    def _self_assign(self, name: str, args: dict, svc: Thoth, project: str) -> bool:
+        """thoth_assign to hermes starts no process: the coordinator does the work in its own turn."""
+        if name != "thoth_assign":
+            return False
+        agent = str(args.get("agent") or "").strip().lower()
+        if not agent:
+            try:
+                agent = svc.open(project).task(parse_id(args.get("task"), "T"))["agent"]
+            except Exception:
+                return False
+        return agent == "hermes"
+
     def pre_tool_call(self, tool_name: str = "", args: dict | None = None, task_id: str = "", session_id: str = "", **_: Any) -> dict | None:
         if tool_name not in GATED:
             return None
         args = dict(args or {})
         svc = self.service()
         project = str(args.get("project") or "").strip() or self.default_project()
+        if self._self_assign(tool_name, args, svc, project):
+            return None
         try:
             text, key = self._approval_text(tool_name, args, svc, project)
         except BrainError as exc:
@@ -185,7 +214,7 @@ class ThothPlugin:
             project = str(args.get("project") or "").strip() or self.default_project()
             scope = str(kwargs.get("session_id") or kwargs.get("task_id") or "")
             try:
-                if name in GATED and not self._consume_ticket(name, args, scope):
+                if name in GATED and not self._self_assign(name, args, svc, project) and not self._consume_ticket(name, args, scope):
                     return json.dumps({"ok": False, "error": self._gate(name)})
                 result = call(svc, name, args, lambda: project)
                 self.remember(project)
@@ -266,6 +295,12 @@ class ThothPlugin:
         ]
         if running:
             lines.append("Running: " + "; ".join(f"{r['ref']} {r['agent']} {r['kind']} {r['task_ref']}: {r['progress'][:80]}" for r in running))
+        try:
+            needs = Thoth(settings=self.settings()).needs(str(root))
+        except Exception:
+            needs = []
+        if needs:
+            lines.append("Waiting on the user or coordinator: " + "; ".join(f"{n['title']} ({n['tool']} {n['task']})" for n in needs[:4]))
         lines.append("Use thoth_status for details. Record important decisions with thoth_note so Claude Code and Codex see them.")
         return {"context": "\n".join(lines)}
 
@@ -285,6 +320,8 @@ class ThothPlugin:
                     "",
                     *data["board"],
                 ]
+                if data["needs_you"]:
+                    out += ["", "Needs you:"] + [f"  • {n}" for n in data["needs_you"]]
                 if data["running"]:
                     out += ["", "Running:"] + [f"  {r['run']} {r['agent']} {r['kind']} {r['task']}: {r['progress']}" for r in data["running"]]
                 if data["decisions"]:
@@ -320,7 +357,7 @@ def doctor_text(settings: dict[str, Any]) -> str:
 
 
 def _fingerprint(name: str, args: dict) -> str:
-    relevant = {k: args.get(k) for k in ("project", "task", "agent", "reviewer", "instructions")}
+    relevant = {k: args.get(k) for k in ("project", "task", "agent", "reviewer", "instructions", "override")}
     blob = json.dumps([name, relevant], sort_keys=True, default=str)
     return hashlib.sha256(blob.encode()).hexdigest()
 
@@ -372,6 +409,17 @@ def register(ctx: Any) -> None:
             handler=plugin.handler(name),
             emoji=EMOJI.get(name, ""),
         )
+    from .thoth_core import brain as _brain_mod
+
+    def _push_change(root: str, type_: str) -> None:
+        try:
+            from hermes_cli.plugin_events import broadcast_plugin_event
+
+            broadcast_plugin_event("thoth", "changed", {"project": root, "type": type_})
+        except Exception:
+            pass
+
+    _brain_mod.CHANGE_LISTENERS.append(_push_change)
     ctx.register_hook("pre_tool_call", plugin.pre_tool_call)
     ctx.register_hook("pre_llm_call", plugin.pre_llm_call)
     ctx.register_command(
@@ -401,6 +449,8 @@ def register(ctx: Any) -> None:
 
     def _unload() -> None:
         atexit.unregister(_at_exit)
+        if _push_change in _brain_mod.CHANGE_LISTENERS:
+            _brain_mod.CHANGE_LISTENERS.remove(_push_change)
         _MANAGER.shutdown("the Thoth plugin was unloaded")
 
     on_unload = getattr(ctx, "on_unload", None)
