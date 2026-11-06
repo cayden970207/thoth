@@ -122,23 +122,31 @@ class ThothPlugin:
     # -- approval ----------------------------------------------------------------
 
     def _approval_text(self, name: str, args: dict, svc: Thoth, project: str) -> tuple[str, str]:
+        """What the approval card says: first what will happen, in plain words; the technical details last."""
         if name == "thoth_init":
             setup = " ".join(str(args.get("setup") or "").split())
+            run = " ".join(str(args.get("run") or "").split())
             where = str(Path(project).expanduser())
-            text = (f"Thoth: before an agent starts on a task in {where}, run `{setup}` in that task's folder. "
-                    "It runs as you, outside the agents' sandbox and with network access (to install dependencies).")
-            return text, f"thoth:setup:{_short_hash(where + setup)}"
+            lines = []
+            if setup:
+                lines.append(f"Before an agent starts on a task, Thoth will run `{setup}` in that task's folder.")
+            if run:
+                lines.append(f"To preview the app, Thoth will start it with `{run}` in a copy of the version you open.")
+            lines.append("These run as you, outside the agents' sandbox and with network access.")
+            lines.append(f"Details: project {where}.")
+            return "\n".join(lines), f"thoth:setup:{_short_hash(where + setup + '|' + run)}"
         brain = svc.open(project)
         task = brain.task(parse_id(args.get("task"), "T"))
+        what = f"{task['ref']} “{task['title']}”"
         if name == "thoth_merge":
-            base = brain.meta().get("base_branch", "")
-            text = (
-                f"Thoth: merge {task['ref']} \"{task['title']}\" (by {task['agent']}, status {task['status']}"
-                + (", OVERRIDING the open review comments" if args.get("override") else "")
-                + ") "
-                f"from branch {task['branch']} into {base} in {brain.root} with git merge --no-ff. "
-                "Conflicts are aborted and leave the base branch unchanged."
-            )
+            base = brain.meta().get("base_branch", "") or "main"
+            builder = _AGENT_LABEL.get(task["agent"], task["agent"].capitalize())
+            if args.get("override"):
+                head = f"Merge {what} into {base}, although its review comments are still open."
+            else:
+                head = f"Merge {what} into {base}."
+            body = f"{builder} built it" + (", and the review passed." if task["status"] == "approved" else ".") + " If anything conflicts, nothing changes."
+            text = f"{head}\n{body}\nDetails: git merge --no-ff {task['branch']} in {brain.root}."
             key = f"thoth:merge{':override' if args.get('override') else ''}:{_short_hash(str(brain.root))}"
             return text, key
         if name == "thoth_review":
@@ -151,29 +159,32 @@ class ThothPlugin:
         ok, detail = driver.available()
         if not ok:
             raise BrainError(detail)
+        label = _AGENT_LABEL[agent]
         note = _PERMISSION_NOTE[(agent, kind)].format(mode=svc.settings.get("claude_permission_mode", "acceptEdits"))
-        excerpt = " ".join((task["detail"] or task["title"]).split())
-        if len(excerpt) > 600:
-            excerpt = excerpt[:600] + f"… [{len(task['detail'])} characters in total]"
-        extra = " ".join(str(args.get("instructions") or "").split())
-        if len(extra) > 400:
-            extra = extra[:400] + "…"
-        verb = "review" if kind == "review" else ("revise" if name == "thoth_revise" else "work on")
-        if name == "thoth_revise":
+        minutes = max(1, round(int(svc.settings["run_timeout_seconds"]) / 60))
+        if kind == "review":
+            builder = _AGENT_LABEL.get(task["agent"], task["agent"].capitalize())
+            head = f"{label} will review {what}, which {builder} built. It only reads; it cannot change anything."
+        elif name == "thoth_revise":
             fb = " ".join(str(args.get("feedback") or "").split())
-            extra = ("User feedback: " + fb[:400]) + (" " + extra if extra else "")
+            head = f"{label} will rework {what} with your feedback: “{fb[:300]}{'…' if len(fb) > 300 else ''}”"
+        else:
+            head = f"{label} will work on {what}."
+        lines = [head]
+        if kind == "build":
+            lines.append(f"It can only change this task's own copy of the project, and stops after {minutes} minutes at most.")
         model = str(args.get("model") or task.get("model") or svc.settings.get(f"{agent}_model") or "").strip()
         effort = str(args.get("effort") or task.get("effort") or "").strip()
-        if model or effort:
-            detail += ", model " + (model or "default") + (f", {effort} effort" if effort else "")
-        text = (
-            f"Thoth: start {_AGENT_LABEL[agent]} ({detail}) to {verb} {task['ref']} \"{task['title']}\" in "
-            f"{brain.root}/.thoth/worktrees/{task['ref']} ({note}); timeout {svc.settings['run_timeout_seconds']}s. "
-            f"Uses your existing {_AGENT_LABEL[agent]} login and plan. Task: {excerpt}"
-            + (f" Extra instructions: {extra}" if extra else "")
-        )
+        lines.append("Model: " + (model or "default") + (f" · {effort} effort" if effort else "") + ".")
+        excerpt = " ".join((task["detail"] or task["title"]).split())
+        if excerpt and excerpt != task["title"]:
+            lines.append("Task: " + (excerpt[:300] + "…" if len(excerpt) > 300 else excerpt))
+        extra = " ".join(str(args.get("instructions") or "").split())
+        if extra:
+            lines.append("Extra instructions: " + (extra[:300] + "…" if len(extra) > 300 else extra))
+        lines.append(f"Details: {detail} · {brain.root}/.thoth/worktrees/{task['ref']} · {note} · uses your {label} login and plan.")
         key = f"thoth:{kind}:{agent}:{_short_hash(str(brain.root))}"
-        return text, key
+        return "\n".join(lines), key
 
     def _self_assign(self, name: str, args: dict, svc: Thoth, project: str) -> bool:
         """thoth_assign to hermes starts no process: the coordinator does the work in its own turn."""
@@ -189,7 +200,7 @@ class ThothPlugin:
 
     @staticmethod
     def _gated(name: str, args: dict) -> bool:
-        return name in GATED or (name == "thoth_init" and bool(str(args.get("setup") or "").strip()))
+        return name in GATED or (name == "thoth_init" and bool(str(args.get("setup") or args.get("run") or "").strip()))
 
     def pre_tool_call(self, tool_name: str = "", args: dict | None = None, task_id: str = "", session_id: str = "", **_: Any) -> dict | None:
         args = dict(args or {})
@@ -210,7 +221,25 @@ class ThothPlugin:
             now = time.time()
             self._tickets = {k: v for k, v in self._tickets.items() if now - v[0] < TICKET_TTL}
             self._tickets[(session_id or task_id, _fingerprint(tool_name, args))] = (now, key)
+        self._mark_waiting(project, text.split("\n", 1)[0], session_id or task_id)
         return {"action": "approve", "message": text, "rule_key": key}
+
+    def post_tool_call(self, tool_name: str = "", args: dict | None = None, status: str = "", **_: Any) -> None:
+        """A gated call the user rejected (or that was blocked) is no longer waiting for an OK."""
+        args = dict(args or {})
+        if status == "blocked" and self._gated(tool_name, args):
+            project = str(args.get("project") or "").strip() or self.default_project()
+            self._mark_waiting(project, "", "")
+
+    @staticmethod
+    def _mark_waiting(project: str, summary: str, session: str) -> None:
+        """Let the Thoth page say that Hermes is waiting for the user's OK (and open that chat)."""
+        try:
+            root = find_brain_root(project) if project else None
+            if root is not None:
+                Brain(root).set_meta("pending_approval", json.dumps({"summary": summary[:220], "session": session, "at": time.time()}) if summary else "")
+        except Exception:
+            logger.debug("thoth: could not record the pending approval", exc_info=True)
 
     def _consume_ticket(self, name: str, args: dict, scope: str) -> bool:
         with self._lock:
@@ -235,8 +264,10 @@ class ThothPlugin:
             project = str(args.get("project") or "").strip() or self.default_project()
             scope = str(kwargs.get("session_id") or kwargs.get("task_id") or "")
             try:
-                if self._gated(name, args) and not self._self_assign(name, args, svc, project) and not self._consume_ticket(name, args, scope):
-                    return json.dumps({"ok": False, "error": self._gate(name)})
+                if self._gated(name, args) and not self._self_assign(name, args, svc, project):
+                    if not self._consume_ticket(name, args, scope):
+                        return json.dumps({"ok": False, "error": self._gate(name)})
+                    self._mark_waiting(project, "", "")  # approved: nothing is waiting any more
                 if name == "thoth_wait":
                     result = self._wait(svc, args, project)
                 else:
@@ -508,6 +539,7 @@ def register(ctx: Any) -> None:
 
     _brain_mod.CHANGE_LISTENERS.append(_push_change)
     ctx.register_hook("pre_tool_call", plugin.pre_tool_call)
+    ctx.register_hook("post_tool_call", plugin.post_tool_call)
     ctx.register_hook("pre_llm_call", plugin.pre_llm_call)
     ctx.register_command(
         "thoth",
@@ -531,6 +563,10 @@ def register(ctx: Any) -> None:
 
     def _at_exit() -> None:
         _MANAGER.shutdown("Hermes exited")
+        from .thoth_core import preview as _preview
+
+        _preview.stop_apps()
+        _preview.stop_all()
 
     atexit.register(_at_exit)
 
@@ -539,6 +575,10 @@ def register(ctx: Any) -> None:
         if _push_change in _brain_mod.CHANGE_LISTENERS:
             _brain_mod.CHANGE_LISTENERS.remove(_push_change)
         _MANAGER.shutdown("the Thoth plugin was unloaded")
+        from .thoth_core import preview as _preview
+
+        _preview.stop_apps()
+        _preview.stop_all()
 
     on_unload = getattr(ctx, "on_unload", None)
     if callable(on_unload):

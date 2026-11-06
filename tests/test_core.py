@@ -142,7 +142,7 @@ def test_gated_tools_need_the_hook(repo):
     assert not blocked["ok"] and "approval" in blocked["error"]
     # The hook escalates to Hermes approval with a readable summary and a scoped rule key.
     decision = ctx.hooks["pre_tool_call"](tool_name="thoth_merge", args={"project": str(repo), "task": "T1"}, session_id="s1")
-    assert decision["action"] == "approve" and "merge T1" in decision["message"]
+    assert decision["action"] == "approve" and decision["message"].startswith("Merge T1")
     assert decision["rule_key"].startswith("thoth:merge:")
     # Ungated tools pass straight through.
     assert ctx.hooks["pre_tool_call"](tool_name="thoth_status", args={}, session_id="s1") is None
@@ -520,3 +520,46 @@ def test_reach_shows_who_has_the_newest_work(repo):
     _time.sleep(0.01)
     brain.add_note(kind="decision", author="codex", body="Amounts are stored in cents", task_id=1)
     assert svc.reach(brain)["T1"][0]["state"] == "notyet"  # Claude has open work and no run since that decision
+
+
+def test_run_command_previews_the_app_in_a_clean_copy(repo):
+    import urllib.request
+    from thoth_core import gitops, preview
+    svc = Thoth(mcp_launcher=None)
+    svc.init(str(repo), run=f"{sys.executable} -m http.server {{port}} --bind 127.0.0.1")
+    svc.plan(str(repo), [{"title": "CRM", "agent": "claude"}])
+    brain = Brain.open(repo)
+    wt = _built(svc, brain, "T1", {"index.html": "<h1>Tiny CRM</h1>\n"}, "page")
+    try:
+        r = svc.preview(str(repo), "T1")
+        assert r["mode"] == "run" and b"Tiny CRM" in urllib.request.urlopen(r["url"], timeout=5).read()
+        assert svc.preview(str(repo), "T1")["url"] == r["url"]   # same version: the running app is reused
+        assert not gitops.is_dirty(wt)                            # it ran in an export, not in the agent's worktree
+        assert (repo / ".thoth" / "previews").is_dir()
+    finally:
+        preview.stop_apps()
+
+
+def test_waiting_banner_appears_and_clears_when_rejected(repo):
+    plugin = _load_plugin()
+    ctx = FakeCtx()
+    plugin.register(ctx)
+    json.loads(ctx.tools["thoth_init"]({"project": str(repo)}, session_id="s1"))
+    json.loads(ctx.tools["thoth_plan"]({"project": str(repo), "tasks": [{"title": "T", "agent": "codex"}]}, session_id="s1"))
+    args = {"project": str(repo), "task": "T1"}
+    ctx.hooks["pre_tool_call"](tool_name="thoth_merge", args=args, session_id="s1")
+    waiting = json.loads(Brain.open(repo).meta()["pending_approval"])
+    assert waiting["summary"].startswith("Merge T1") and waiting["session"] == "s1"
+    ctx.hooks["post_tool_call"](tool_name="thoth_merge", args=args, status="blocked")   # the user said no
+    assert Brain.open(repo).meta()["pending_approval"] == ""
+
+
+def test_a_new_preview_stops_apps_left_by_an_earlier_process(repo):
+    import subprocess as sp
+    from thoth_core import preview
+    previews = repo / ".thoth" / "previews" / "old-app"
+    previews.mkdir(parents=True)
+    orphan = sp.Popen([sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True)
+    (previews / ".thoth-run.pid").write_text(str(orphan.pid))
+    preview._sweep_orphans(repo / ".thoth" / "previews")
+    assert orphan.wait(5) is not None and not (previews / ".thoth-run.pid").exists()

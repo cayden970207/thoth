@@ -157,6 +157,17 @@ def _exclude_exactly(root: Path, rel_paths: list[str]) -> None:
         fh.write("\n".join(new) + "\n")
 
 
+def dependency_dirs(root: Path, names: tuple[str, ...] | list[str] = DEFAULT_DEPENDENCY_DIRS) -> list[str]:
+    """Ignored dependency folders in the main checkout, e.g. node_modules or frontend/node_modules."""
+    wanted = set(names)
+    out = []
+    for entry in ignored_entries(root):
+        rel = entry.rstrip("/")
+        if entry.endswith("/") and Path(rel).name in wanted and not any(part in wanted for part in Path(rel).parts[:-1]):
+            out.append(rel)
+    return out
+
+
 def link_dependencies(root: Path, worktree: Path, names: tuple[str, ...] | list[str] = DEFAULT_DEPENDENCY_DIRS) -> list[str]:
     """Symlink ignored dependency folders from the main checkout into the worktree. Returns what was linked."""
     wanted = set(names)

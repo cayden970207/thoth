@@ -205,7 +205,7 @@ async function openPreview (task) {
     try { opened = ctxRef.os && ctxRef.os.openExternal ? await ctxRef.os.openExternal(r.url) : false } catch (e) {}
     if (!opened) opened = !!window.open(r.url, '_blank')
     if (!opened && await copyText(r.url)) host.notify({ kind: 'info', message: 'Preview link copied — paste it into your browser', detail: r.url })
-    else host.notify({ kind: 'success', message: 'Opened ' + r.what + ' in your browser' })
+    else host.notify({ kind: 'success', message: (r.mode === 'run' ? 'Started and opened ' : 'Opened ') + r.what + ' in your browser' })
   } catch (err) {
     host.notify({ kind: 'warning', message: (err && err.message) || 'Nothing to preview yet' })
   }
@@ -593,7 +593,7 @@ function Canvas ({ snap, d, selected, select, project }) {
         h('div', { key: 't', className: 'th-node-ttl' }, 'Merge into ' + (snap.meta.base_branch || 'main')),
         h('div', { key: 'm', className: 'th-meta' }, h('span', { className: 'th-tag' }, all.filter(t => t.status === 'merged').length + ' merged'),
           shipped.length > 2 ? h('button', { className: 'th-tag th-tagbtn', title: folding ? 'Show the shipped tasks on the canvas' : 'Fold shipped tasks back into Main', onClick: e => { e.stopPropagation(); setShowShipped(v => !v); setAuto(true); setPan({ x: 0, y: 0 }) } }, folding ? 'Show ' + shipped.length : 'Fold') : null,
-          all.some(t => t.status === 'merged' && hasPage(d.byTask[t.id])) ? h('button', { className: 'th-tag th-tagbtn', title: 'Open everything merged so far in your browser', onClick: e => { e.stopPropagation(); openPreview('') } }, h(Icon, { name: 'play', size: 10 }), ' Open') : null),
+          all.some(t => t.status === 'merged' && ((snap.meta.run || '').trim() || hasPage(d.byTask[t.id]))) ? h('button', { className: 'th-tag th-tagbtn', title: 'Open everything merged so far in your browser', onClick: e => { e.stopPropagation(); openPreview('') } }, h(Icon, { name: 'play', size: 10 }), ' Open') : null),
         h('div', { key: 'f', className: 'th-node-ft' }, h('span', { className: 'th-muted' }, 'Needs your approval'),
           (() => { const ready = tasks.filter(t => t.status === 'approved').length; return h('span', { className: 'th-status th-s-' + (ready ? 'ok' : 'todo') }, ready ? ready + ' ready' : 'Waiting') })())
       ], { stack: folding }),
@@ -751,9 +751,16 @@ function Inspector ({ snap, d, selected, tab, setTab, close }) {
   return h('div', { className: 'th-pane' },
     h('div', { className: 'th-ihead' }, h('span', { className: 'th-ico th-' + agent, style: { width: 40, height: 40 } }, h(Icon, { name: KIND_ICON[t.kind || 'code'] || 'build', size: 19 })),
       h('div', { style: { minWidth: 0 } }, h('div', { className: 'th-mono th-muted', style: { whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' } }, t.ref + ' · ' + (t.role ? t.role + ' · ' : '') + KIND_LABEL[t.kind || 'code']), h('div', { className: 'th-ititle' }, t.title))),
-    hasPage(tk) || t.worktree ? h('div', { className: 'th-quick' },
-      hasPage(tk) ? h(Btn, { sm: true, primary: !tk.open && ['built', 'approved', 'changes', 'merged'].includes(t.status), title: 'Open what ' + t.ref + ' built in your browser', onClick: () => openPreview(t.ref) }, h(Icon, { name: 'play', size: 12 }), t.status === 'merged' ? 'Open the merged site' : 'Open preview') : null,
-      t.worktree && t.status !== 'merged' ? h(Btn, { sm: true, ghost: true, title: t.worktree, onClick: () => showFiles(t.worktree) }, h(Icon, { name: 'folder', size: 12 }), 'Show files') : null) : null,
+    (() => {
+      // With a project run command the app is started for this version; otherwise its pages are served as files.
+      const runs = !!(snap.meta.run || '').trim()
+      const can = runs ? (t.head_commit && t.head_commit !== t.base_commit) || t.status === 'merged' : hasPage(tk)
+      if (!can && !t.worktree) return null
+      return h('div', { className: 'th-quick' },
+        can ? h(Btn, { sm: true, primary: !tk.open && ['built', 'approved', 'changes', 'merged'].includes(t.status), title: runs ? `Start the app (${snap.meta.run}) for this version and open it` : 'Open what ' + t.ref + ' built in your browser', onClick: () => openPreview(t.ref) },
+          h(Icon, { name: 'play', size: 12 }), runs ? (t.status === 'merged' ? 'Run the merged app' : 'Run & open') : t.status === 'merged' ? 'Open the merged site' : 'Open preview') : null,
+        t.worktree && t.status !== 'merged' ? h(Btn, { sm: true, ghost: true, title: t.worktree, onClick: () => showFiles(t.worktree) }, h(Icon, { name: 'folder', size: 12 }), 'Show files') : null)
+    })(),
     tk.open ? h('div', { className: 'th-livebox' }, h(Mini, { agent: tk.open.agent }), h('span', { style: { flex: 1, minWidth: 0 }, title: tk.open.progress || '' }, (tk.open.kind === 'review' ? 'Reviewing · ' : 'Working · ') + humanize(tk.open.progress)), h(Elapsed, { since: tk.open.started_at || tk.open.created_at })) : null,
     err ? h('div', { className: 'th-errbox' }, h('b', null, h(Icon, { name: 'alert', size: 13 }), ' ', last.kind === 'review' ? 'The review stopped' : 'The run stopped', ' · ', last.status), h('span', null, err.length > 280 ? err.slice(0, 278) + '…' : err)) : null,
     tk.issues.length ? [
@@ -955,11 +962,13 @@ function ThothPage () {
   const select = ref => { setSelected(ref); setTab('task'); setOpen(true) }
   const css = [h('style', { key: 's' }, CSS), h(LogoSprite, { key: 'l' })]
   if (!s.snap) {
+    // A backend that is restarting is not an error the user has to fix: say so and keep retrying.
+    const offline = s.error && /gateway|socket|hermes:api|ECONN|offline|fetch|network/i.test(s.error)
     const first = !s.error && !s.projects.length && !s.reconnecting
     return h('div', { className: 'th-root' }, css, h('div', { className: 'th-emptypage' },
       h('div', { className: 'th-onb-logos' }, ['claude', 'hermes', 'codex'].map(a => h(Mini, { key: a, agent: a, size: a === 'hermes' ? 56 : 42 }))),
-      h('h2', null, s.error ? 'Thoth can’t reach its backend' : first ? 'One brain for your whole AI team' : s.reconnecting ? 'Reconnecting to Thoth…' : 'Loading the shared brain…'),
-      h('p', null, s.error ? s.error + '. Make sure the Thoth plugin is enabled in Capabilities → Plugins.' : first ? 'Hermes plans, Claude Code and Codex build in parallel, review each other, and everything they decide and make stays in one place.' : ''),
+      h('h2', null, offline || s.reconnecting ? 'Reconnecting to Hermes…' : s.error ? 'Thoth can’t reach its backend' : first ? 'One brain for your whole AI team' : 'Loading the shared brain…'),
+      h('p', null, offline ? 'Its backend is starting up. Thoth comes back by itself in a moment.' : s.error ? s.error + '. Make sure the Thoth plugin is enabled in Capabilities → Plugins.' : first ? 'Hermes plans, Claude Code and Codex build in parallel, review each other, and everything they decide and make stays in one place.' : ''),
       first ? h('ol', { className: 'th-onb' },
         h('li', null, h('b', null, 'Open a chat in a git project'), h('span', null, 'Any folder with git works — code, a game, docs.')),
         h('li', null, h('b', null, 'Tell Hermes the goal'), h('span', null, '“Make a tiny pixel game: Codex draws the sprites, Claude builds it.”')),
@@ -986,6 +995,15 @@ function ThothPage () {
       h('button', { className: 'th-chip', title: 'Hand coordination to ' + AGENTS[nextCoord].name, onClick: () => act({ action: 'coordinator', agent: nextCoord }, r => `${AGENTS[r.coordinator].name} coordinates now. Hermes can print the setup command.`) },
         h(Icon, { name: 'crown', size: 13, fill: true, style: { color: '#e0a81e' } }), h(Mini, { agent: coord, size: 18 }), AGENTS[coord].name)),
     h('div', { className: 'th-content' },
+      (() => {
+        let ask = null
+        try { ask = JSON.parse(snap.meta.pending_approval || 'null') } catch (e) {}
+        if (!ask || !ask.summary || Date.now() / 1000 - ask.at > 600 || store.dismissedAsk === ask.at) return null
+        return h('div', { className: 'th-banner th-banner-ask', role: 'status' }, h(Icon, { name: 'flag', size: 15 }),
+          h('span', null, h('b', null, 'Hermes needs your OK · '), ask.summary),
+          h('button', { className: 'th-btn th-sm th-primary', onClick: () => openChat(ask.session) }, 'Open chat'),
+          h('button', { className: 'th-ib', 'aria-label': 'Dismiss', onClick: () => { store.dismissedAsk = ask.at; emit() } }, h(Icon, { name: 'x', size: 14 })))
+      })(),
       s.newProject ? h('div', { className: 'th-banner', role: 'status' }, h(Icon, { name: 'spark', size: 15 }),
         h('span', null, 'Hermes started a new project: ', h('b', null, s.newProject.name), s.newProject.goal ? ' — ' + s.newProject.goal : ''),
         h('button', { className: 'th-btn th-sm th-primary', onClick: () => switchProject(s.newProject.path) }, 'Open it'),
@@ -1018,18 +1036,42 @@ function ThothPage () {
     h(CommandBar, { snap, project, d }))
 }
 
+const pause = ms => new Promise(r => setTimeout(r, ms))
+const focusedChat = () => { try { return host.state.focusedSessionId && host.state.focusedSessionId.get() } catch (e) { return null } }
+// Send a request to Hermes without leaving the Thoth page when possible:
+// 1. a chat that is on screen beside Thoth, 2. this project's chat from last time if it is on screen,
+// 3. a new chat tab (the Thoth page stays open in its own tab), 4. a new chat in place.
+// Each step addresses one exact session, so a request never lands in an unrelated chat.
 async function sendToHermes (text) {
-  // Prefer a chat the user has open beside the Thoth page (split view); otherwise start a new chat.
-  let sid = null
-  try { sid = host.state.focusedSessionId && host.state.focusedSessionId.get() } catch (e) {}
-  if (sid && host.composer && host.composer.submit(sid, text)) return 'open'
-  if (ctxRef.runAction) ctxRef.runAction('session.new')
-  for (let i = 0; i < 20; i++) {
-    await new Promise(r => setTimeout(r, 150))
-    if (host.composer && host.composer.submit('new', text)) return 'new'
+  const before = focusedChat()
+  if (before && host.composer && host.composer.submit(before, text)) return { where: 'open', session: before }
+  let saved = ''
+  try { saved = ctxRef.storage && ctxRef.storage.get ? await ctxRef.storage.get('chat:' + store.project) : '' } catch (e) {}
+  if (saved && saved !== before && host.composer && host.composer.submit(saved, text)) return { where: 'same', session: saved }
+  if (ctxRef.runAction) {
+    let opened = null
+    try { opened = await ctxRef.runAction('session.newTab') } catch (e) {}
+    if (opened && opened.ok !== false) {
+      for (let i = 0; i < 30; i++) {
+        await pause(120)
+        const now = focusedChat()
+        if (now && now !== before && host.composer && host.composer.submit(now, text)) return { where: 'tab', session: now }
+      }
+    }
+    ctxRef.runAction('session.new')
   }
-  if (host.composer && await host.composer.setDraft(null, text)) return 'draft'
-  return ''
+  for (let i = 0; i < 20; i++) {
+    await pause(150)
+    if (host.composer && host.composer.submit('new', text)) return { where: 'new', session: focusedChat() }
+  }
+  if (host.composer && await host.composer.setDraft(null, text)) return { where: 'draft', session: null }
+  return { where: '', session: null }
+}
+function openChat (session) {
+  // The chat Hermes uses for this project, as a tab next to the Thoth page.
+  try { if (session && host.openSession) { host.openSession(session, { intent: 'tab' }); return true } } catch (e) {}
+  host.notify({ kind: 'info', message: 'Open your Hermes chat to answer' })
+  return false
 }
 
 function CommandBar ({ snap, project, d }) {
@@ -1050,18 +1092,25 @@ function CommandBar ({ snap, project, d }) {
     if (!body || sending) return
     setSending(true)
     const msg = `[From the Thoth page. Project open there: ${project.name} (${snap.project}). You coordinate with the Thoth tools; Claude Code and Codex do the work.] ${body}`
-    const where = await sendToHermes(msg)
+    const { where, session } = await sendToHermes(msg)
     setSending(false)
     if (!where) { host.notify({ kind: 'warning', message: 'Open a Hermes chat, then try again' }); return }
     setText('')
-    host.notify({ kind: 'info', message: where === 'open' ? 'Sent to your open Hermes chat' : where === 'new' ? 'Sent to Hermes in a new chat — approve agent launches there' : 'Put in the Hermes composer — press Enter to send' })
+    if (session) { try { ctxRef.storage.set('chat:' + store.project, session) } catch (e) {} }
+    const back = { label: 'Back to Thoth', onClick: () => host.navigate('/thoth') }
+    host.notify(where === 'open' || where === 'same' ? { kind: 'info', message: 'Sent to Hermes — the work shows up here as it happens' }
+      : where === 'tab' ? { kind: 'info', message: 'Hermes is on it in a new tab. Approve agent launches there; this page keeps showing the work.', action: back }
+        : where === 'new' ? { kind: 'info', message: 'Sent to Hermes in a new chat. Approve agent launches there.', action: back }
+          : { kind: 'info', message: 'Put in the Hermes composer — press Enter to send' })
   }
   return h('section', { className: 'th-cmd th-composer' },
     chips.length ? h('div', { className: 'th-cmd-chips' }, chips.map(c => h('button', { key: c, className: 'th-cmd-chip', title: 'Send to Hermes: ' + c, onClick: () => send(c) }, h(Icon, { name: 'spark', size: 11 }), c))) : null,
     h('div', { className: 'th-cmd-box' },
       h(Mini, { agent: 'hermes', size: 26 }),
       h('kbd', { className: 'th-kbd', title: 'Press / to type here' }, '/'),
-      h('input', { className: 'th-cmd-input', value: text, placeholder: 'Tell the team what to do next — e.g. “Make the coins shinier, then update the game”', onChange: e => setText(e.target.value), onKeyDown: e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send() } } }),
+      h('textarea', { className: 'th-cmd-input', rows: 1, value: text, placeholder: 'Tell the team what to do next — e.g. “Make the coins shinier, then update the game”',
+        onChange: e => { setText(e.target.value); const el = e.target; el.style.height = 'auto'; el.style.height = Math.min(el.scrollHeight, 120) + 'px' },
+        onKeyDown: e => { if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); send(); e.target.style.height = 'auto' } } }),
       h('button', { className: 'th-btn th-sm th-primary', disabled: sending || !text.trim(), onClick: () => send() }, sending ? 'Sending…' : 'Send to Hermes')))
 }
 
@@ -1561,6 +1610,8 @@ button.th-ost{padding:0;border-radius:8px}button.th-ost:hover b{text-decoration:
 .th-behind{position:absolute;top:-10px;right:12px;display:inline-flex;align-items:center;gap:4px;height:20px;padding:0 8px;border-radius:999px;font-size:10.5px;font-weight:700;color:#8a5200;background:#fff4e0;border:1px solid #f3c77a!important;box-shadow:var(--th-shadow);cursor:pointer;z-index:2}
 .th-behind:hover{background:#ffe9c2}
 .th-reachlist{display:grid;gap:4px;min-width:0}.th-reachrow{display:flex;align-items:center;gap:7px;font-size:12px;color:var(--th-t2);min-width:0}.th-reachrow>span:nth-child(2){flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.th-banner-ask{background:color-mix(in srgb,var(--th-select) 9%,var(--th-panel));border-color:color-mix(in srgb,var(--th-select) 35%,transparent)}.th-banner-ask>svg{color:var(--th-select)}
+textarea.th-cmd-input{resize:none;line-height:1.45;padding:4px 0;max-height:120px;overflow-y:auto;font-family:inherit}
 `
 
 /* ------------------------------------------------------------------ plugin */

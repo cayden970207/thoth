@@ -40,8 +40,9 @@ def call(svc: Thoth, name: str, args: dict[str, Any], default_project: Callable[
     if not project:
         raise BrainError("No project folder: pass `project`")
     if name == "thoth_init":
-        setup = args.get("setup")
-        return svc.init(project, goal=str(args.get("goal") or ""), setup=None if setup is None else str(setup), create=bool(args.get("create")))
+        setup, run = args.get("setup"), args.get("run")
+        return svc.init(project, goal=str(args.get("goal") or ""), setup=None if setup is None else str(setup), create=bool(args.get("create")),
+                        run=None if run is None else str(run))
     if name == "thoth_preview":
         return svc.preview(project, task=args.get("task") or None)
     if name == "thoth_plan":

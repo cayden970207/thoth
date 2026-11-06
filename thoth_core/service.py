@@ -101,7 +101,7 @@ class Thoth:
 
     # -- project -----------------------------------------------------------------
 
-    def init(self, project_dir: str, goal: str = "", setup: str | None = None, create: bool = False) -> dict:
+    def init(self, project_dir: str, goal: str = "", setup: str | None = None, create: bool = False, run: str | None = None) -> dict:
         folder = Path(project_dir).expanduser()
         made = made_repo = False
         if create and not folder.exists():
@@ -128,6 +128,8 @@ class Thoth:
             existed = False
         if setup is not None:
             brain.set_meta("setup", setup.strip())
+        if run is not None:
+            brain.set_meta("run", run.strip())
         brain.write_snapshot()
         result = self.status(str(root))
         result["initialized"] = not existed
@@ -698,6 +700,9 @@ class Thoth:
         """
         brain = self.open(project_dir)
         current = brain.task(parse_id(task, "T")) if task not in (None, "", "main") else None
+        run = (brain.meta().get("run") or "").strip()
+        if run:
+            return self._run_preview(brain, current, run)
         if current and current["worktree"] and Path(current["worktree"]).is_dir():
             folder, what = Path(current["worktree"]), f"{current['ref']} {current['title']}"
         else:
@@ -713,6 +718,23 @@ class Thoth:
             raise BrainError(f"{current['ref'] if current else 'The project'} has no web page to preview yet. Its files are in {folder}.")
         port = preview.serve(folder)
         return {"url": f"http://127.0.0.1:{port}/{page}", "what": what, "folder": str(folder), "page": page or "index.html"}
+
+    def _run_preview(self, brain: Brain, current: dict | None, run: str) -> dict:
+        """Start the project's app (its ``run`` command) for a task's newest version, or for main."""
+        if current is not None and current["status"] != "merged":
+            if not current["head_commit"] or current["head_commit"] == current["base_commit"]:
+                raise BrainError(f"{current['ref']} has no version to run yet")
+            commit, key, what = current["head_commit"], current["ref"], f"{current['ref']} {current['title']}"
+        else:
+            base = brain.meta().get("base_branch") or "main"
+            commit, key, what = gitops.head(brain.root, base), "main", f"{base}, with everything merged so far"
+        try:
+            port = preview.run_app(brain.root, commit, run, f"{brain.root.name}-{key}", clean_env(self.settings.get("env_passthrough") or ()),
+                                   brain.root / ".thoth" / "previews", link_from=brain.root,
+                                   links=gitops.dependency_dirs(brain.root, tuple(self.settings.get("dependency_dirs") or gitops.DEFAULT_DEPENDENCY_DIRS)))
+        except RuntimeError as exc:
+            raise BrainError(str(exc)) from exc
+        return {"url": f"http://127.0.0.1:{port}/", "what": what, "folder": str(brain.root), "page": "", "mode": "run", "command": run}
 
     def output_url(self, project_dir: str, task: Any, path: str) -> dict:
         """A link to one file a task produced (a video, a sound, a page, a PDF), for viewing it in place."""

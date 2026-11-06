@@ -112,6 +112,11 @@ as `.env`. The **Outputs** view collects everything the team made that you can l
 web pages and documents — and plays or shows each one in place. On the canvas, shipped work folds into
 the Main card once there is more than a little of it, so a long project stays readable.
 
+For an app with a backend (say a CRM whose server also serves its pages), give the project a run command —
+`thoth_init(run="python3 backend/server.py --port {port}")`, approved by you. **Run & open** then starts the
+app for the version you are looking at, in a clean copy under `.thoth/previews/`, so the database or logs it
+writes never end up in an agent's work or your checkout.
+
 **Dependencies.** A task worktree is a clean checkout, and the agents' sandboxes have no network, so they
 cannot reinstall packages. Thoth links ignored `node_modules`, `.venv` and `venv` folders from your main
 checkout into each new worktree (agents can read them, not change them; the links are excluded from git).
@@ -194,6 +199,9 @@ environment passthrough.
   you approve a merge. In a repository with no commits it makes one empty initial commit.
 - **Background processes**: runs continue after the tool call returns, up to the timeout; they are
   killed (whole process group) on cancel, timeout, plugin unload and Hermes exit.
+- **Run previews**: with a project run command (approved by you), Thoth exports the version you open to
+  `.thoth/previews/` and starts that command there as you, outside the agents' sandbox, on a free localhost
+  port. At most 4 apps run at once; they stop when Hermes exits, and leftovers are stopped on the next start.
 - **Previews**: when you (or Hermes) open a preview, a static file server listens on `127.0.0.1` on a
   free port for that task's folder, inside the Hermes process. It only answers GET/HEAD and never serves
   hidden paths. At most 8 run at once.

@@ -6,237 +6,111 @@ Each entry is ``name -> (description, parameters)``. Hermes wraps them as
 
 from __future__ import annotations
 
-_PROJECT = {
-    "type": "string",
-    "description": "Project folder (any path inside the git repo). Defaults to the current session's folder.",
-}
+_PROJECT = {"type": "string"}  # the project folder; defaults to the chat's folder (see thoth_init)
 _TASK = {"type": "string", "description": "Task id, e.g. T3"}
-_AGENT = {"type": "string", "enum": ["claude", "codex"], "description": "claude = Claude Code CLI, codex = Codex CLI"}
-_WORKER = {"type": "string", "enum": ["claude", "codex", "hermes"],
-           "description": "claude = Claude Code CLI, codex = Codex CLI (can also generate and process images), hermes = the coordinator does it itself"}
-_KIND = {"type": "string", "enum": ["code", "asset", "doc", "research", "design", "qa"],
-         "description": "What the task produces. Not only code: asset (images, sprites, audio), doc, research, design, qa"}
-_ROLE = {"type": "string", "description": "The role the agent plays on this task, e.g. Art pipeline, Game developer, Level designer, QA"}
-_MODEL = {"type": "string", "description": "Model for this agent: Claude Code takes fable, opus, sonnet or haiku (or a full model name); Codex takes a model slug such as gpt-6.1-sol. Empty = the agent's default. See thoth_models."}
-_EFFORT = {"type": "string", "enum": ["low", "medium", "high", "xhigh", "max", "ultra"], "description": "Reasoning effort (ultra is Codex only)"}
+_AGENT = {"type": "string", "enum": ["claude", "codex"]}
+_WORKER = {"type": "string", "enum": ["claude", "codex", "hermes"], "description": "hermes = you do it yourself"}
+_KIND = {"type": "string", "enum": ["code", "asset", "doc", "research", "design", "qa"]}
+_ROLE = {"type": "string", "description": "e.g. Game developer, Art pipeline"}
+_MODEL = {"type": "string", "description": "fable|opus|sonnet|haiku, or a Codex slug (thoth_models)"}
+_EFFORT = {"type": "string", "enum": ["low", "medium", "high", "xhigh", "max", "ultra"]}
 
+
+def _obj(props: dict, required: list[str] | None = None) -> dict:
+    out = {"type": "object", "properties": {"project": _PROJECT, **props}}
+    if required:
+        out["required"] = required
+    return out
+
+
+# Short on purpose: every coordinator call carries these. The playbook lives in the coordinate skill.
 TOOLS: dict[str, tuple[str, dict]] = {
     "thoth_init": (
-        "Start (or reopen) the Thoth shared brain for a project so Claude Code, Codex and Hermes can work on it "
-        "as one team. Creates .thoth/ in the repo (kept out of git) with the task board, decisions, notes and run history. "
-        "Call this once per project before planning. For a new project pass create=true: Thoth makes the folder and its "
-        "git repository, so do not run git or mkdir yourself.",
-        {
-            "type": "object",
-            "properties": {
-                "project": _PROJECT,
-                "goal": {"type": "string", "description": "What the team is building, in one or two sentences"},
-                "create": {"type": "boolean", "description": "Make the folder and a git repository if they do not exist yet"},
-                "setup": {"type": "string", "description": "Optional command Thoth runs in each new task worktree before an agent starts, "
-                          "outside the sandbox with network (e.g. `npm ci`, `uv sync`). Needs the user's approval. "
-                          "Without it Thoth links node_modules/.venv from the main checkout."},
-            },
-        },
+        "Start or reopen the shared brain for a project (board, decisions, history in .thoth/). "
+        "For a new project pass create=true: Thoth makes the folder and git repo.",
+        _obj({
+            "project": {"type": "string", "description": "Project folder; other tools default to the chat's folder"},
+            "goal": {"type": "string", "description": "What the team builds"},
+            "create": {"type": "boolean"},
+            "run": {"type": "string", "description": "Command that starts the app for previews, with {port}. Needs the user's approval"},
+            "setup": {"type": "string", "description": "Command run in each new task folder before an agent starts, e.g. npm ci. Needs the user's approval"},
+        }),
     ),
     "thoth_plan": (
-        "Add tasks to the shared board. Work is not only code: give each task a kind (code, asset, doc, research, design, qa) "
-        "and a role, and give it to the agent that suits it (claude: product, UI, game or app building, docs, wide-context work; "
-        "codex: image generation and processing, algorithms, tests, scripts, careful edits; hermes: things you do yourself). "
-        "Split for parallel work and use depends_on to pass one task's files to the next (e.g. assets -> the game that uses them). "
-        "Every task gets its own branch and worktree when it starts.",
-        {
-            "type": "object",
-            "properties": {
-                "project": _PROJECT,
-                "goal": {"type": "string", "description": "Optionally set or update the project goal"},
-                "tasks": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "title": {"type": "string", "description": "Short imperative title"},
-                            "detail": {"type": "string", "description": "Full instructions and acceptance criteria"},
-                            "agent": _WORKER,
-                            "kind": _KIND,
-                            "role": _ROLE,
-                            "model": _MODEL,
-                            "effort": _EFFORT,
-                            "depends_on": {
-                                "type": "array",
-                                "items": {"type": ["string", "integer"]},
-                                "description": "Existing task ids (\"T2\") or 1-based positions of earlier tasks in this list (1, 2)",
-                            },
-                        },
-                        "required": ["title"],
-                    },
-                },
-            },
-            "required": ["tasks"],
-        },
+        "Add tasks. Give each an agent (claude: product, UI, apps, docs; codex: images, algorithms, tests, scripts; "
+        "hermes: you), a kind and a role. Split for parallel work; depends_on hands one task's files to the next.",
+        _obj({
+            "goal": {"type": "string", "description": "Set or update the project goal"},
+            "tasks": {"type": "array", "items": {"type": "object", "properties": {
+                "title": {"type": "string", "description": "Short imperative"},
+                "detail": {"type": "string", "description": "Instructions and acceptance criteria"},
+                "agent": _WORKER, "kind": _KIND, "role": _ROLE, "model": _MODEL, "effort": _EFFORT,
+                "depends_on": {"type": "array", "items": {"type": ["string", "integer"]}, "description": "Task ids (\"T2\") or 1-based positions in this list"},
+            }, "required": ["title"]}},
+        }, ["tasks"]),
     ),
     "thoth_assign": (
-        "Start an agent on a task in the background. The agent (Claude Code or Codex CLI) runs in the task's own git "
-        "worktree with a brief built from the shared brain (goal, board, decisions, handoffs, review comments, dependency "
-        "results). Its work is committed to the task branch when it finishes and its decisions are written back to the brain. "
-        "Re-assigning a task the same agent worked on resumes that agent's session. Returns at once; use thoth_wait.",
-        {
-            "type": "object",
-            "properties": {
-                "project": _PROJECT,
-                "task": _TASK,
-                "agent": _WORKER,
-                "instructions": {"type": "string", "description": "Extra instructions for this run only"},
-                "model": _MODEL,
-                "effort": _EFFORT,
-            },
-            "required": ["task"],
-        },
+        "Start an agent on a task in the background, in the task's own worktree, with a brief from the brain. "
+        "Its work is committed when it ends; re-assigning resumes its session. Returns at once: then call thoth_wait.",
+        _obj({"task": _TASK, "agent": _WORKER, "instructions": {"type": "string", "description": "Extra instructions for this run"},
+              "model": _MODEL, "effort": _EFFORT}, ["task"]),
     ),
     "thoth_review": (
-        "Cross-review: start a different agent (by default the other one) on a read-only review of a built task's diff. "
-        "The verdict (approve / changes) and comments land on the task, so a follow-up thoth_assign gets them automatically.",
-        {
-            "type": "object",
-            "properties": {
-                "project": _PROJECT,
-                "task": _TASK,
-                "reviewer": _AGENT,
-                "instructions": {"type": "string", "description": "What to focus on"},
-                "model": _MODEL,
-                "effort": _EFFORT,
-            },
-            "required": ["task"],
-        },
+        "Read-only cross-review of a built task by another agent (default: the other one). Verdict and comments go on the task.",
+        _obj({"task": _TASK, "reviewer": _AGENT, "instructions": {"type": "string", "description": "What to focus on"},
+              "model": _MODEL, "effort": _EFFORT}, ["task"]),
     ),
     "thoth_wait": (
-        "Wait until runs finish (or the timeout passes) and return their results: status, summary, verdict, commit and diffstat. "
-        "With no runs given, waits for every open run.",
-        {
-            "type": "object",
-            "properties": {
-                "project": _PROJECT,
-                "runs": {"type": "array", "items": {"type": "string"}, "description": "Run ids, e.g. [\"R4\", \"R5\"]"},
-                "timeout_seconds": {"type": "integer", "description": "Max seconds to wait (default 600, max 3600)"},
-            },
-        },
+        "Wait for runs to finish (default: every open run); returns status, summary, verdict, commit and diffstat.",
+        _obj({"runs": {"type": "array", "items": {"type": "string"}, "description": "Run ids, e.g. [\"R4\"]"},
+              "timeout_seconds": {"type": "integer", "description": "Default 600, max 3600"}}),
     ),
     "thoth_status": (
-        "Show the shared brain: goal, coordinator, task board with branches and commits, live progress of running agents, "
-        "recent decisions and activity. Pass a task to see its runs, notes and review comments.",
-        {"type": "object", "properties": {"project": _PROJECT, "task": _TASK}},
+        "The board: goal, tasks, live progress, decisions, activity. With a task: its runs, notes and review comments.",
+        _obj({"task": _TASK}),
     ),
     "thoth_note": (
-        "Write to the shared brain so every other agent sees it. kinds: decision (rules everyone must follow), context "
-        "(background), handoff (what the next agent needs), risk, question, progress.",
-        {
-            "type": "object",
-            "properties": {
-                "project": _PROJECT,
-                "kind": {"type": "string", "enum": ["decision", "context", "handoff", "progress", "question", "risk"]},
-                "body": {"type": "string"},
-                "task": {"type": "string", "description": "Attach to a task (optional)"},
-            },
-            "required": ["kind", "body"],
-        },
+        "Record something every agent will see: decision (a rule to follow), handoff, risk, question, context, progress.",
+        _obj({"kind": {"type": "string", "enum": ["decision", "context", "handoff", "progress", "question", "risk"]},
+              "body": {"type": "string"}, "task": {"type": "string", "description": "Attach to a task"}}, ["kind", "body"]),
     ),
     "thoth_merge": (
-        "Merge a built or approved task's branch into the base branch (git merge --no-ff). Conflicts are aborted and "
-        "reported, leaving the base branch unchanged. The merge commit is recorded as a version in the brain.",
-        {"type": "object", "properties": {"project": _PROJECT, "task": _TASK, "override": {"type": "boolean", "description": "Merge even though the last review still asks for changes. Only when the user decided so."}}, "required": ["task"]},
+        "Merge a task's branch into the base branch. A conflict aborts and changes nothing.",
+        _obj({"task": _TASK, "override": {"type": "boolean", "description": "Merge despite open review comments, only if the user decided so"}}, ["task"]),
     ),
-    "thoth_context": (
-        "Get the full brief an agent would receive for a task (or the whole BRAIN.md when no task is given).",
-        {"type": "object", "properties": {"project": _PROJECT, "task": _TASK}},
-    ),
-    "thoth_cancel": (
-        "Stop a running agent run (kills its process tree). Its partial work is still committed to the task branch.",
-        {"type": "object", "properties": {"project": _PROJECT, "run": {"type": "string", "description": "Run id, e.g. R4"}}, "required": ["run"]},
-    ),
+    "thoth_context": ("The brief an agent gets for a task, or BRAIN.md without a task.", _obj({"task": _TASK})),
+    "thoth_cancel": ("Stop a run; its partial work is committed.", _obj({"run": {"type": "string", "description": "Run id, e.g. R4"}}, ["run"])),
     "thoth_update_task": (
-        "Edit a task on the board: title, detail, agent, or status 'todo' (reopen) / 'cancelled'.",
-        {
-            "type": "object",
-            "properties": {
-                "project": _PROJECT,
-                "task": _TASK,
-                "title": {"type": "string"},
-                "detail": {"type": "string"},
-                "agent": _WORKER,
-                "kind": _KIND,
-                "role": _ROLE,
-                "model": _MODEL,
-                "effort": _EFFORT,
-                "status": {"type": "string", "enum": ["todo", "cancelled"]},
-            },
-            "required": ["task"],
-        },
+        "Edit a task, reopen it (status todo) or cancel it.",
+        _obj({"task": _TASK, "title": {"type": "string"}, "detail": {"type": "string"}, "agent": _WORKER, "kind": _KIND,
+              "role": _ROLE, "model": _MODEL, "effort": _EFFORT, "status": {"type": "string", "enum": ["todo", "cancelled"]}}, ["task"]),
     ),
     "thoth_complete": (
-        "Finish a task you (the coordinator) did yourself after thoth_assign with agent='hermes': Thoth commits the task "
-        "worktree as a version and records your summary, the files you produced and any decisions for the team.",
-        {
-            "type": "object",
-            "properties": {
-                "project": _PROJECT,
-                "task": _TASK,
-                "summary": {"type": "string"},
-                "outputs": {"type": "array", "items": {"type": "string"}, "description": "Files you produced, e.g. [\"assets/logo.png — game logo\"]"},
-                "decisions": {"type": "array", "items": {"type": "string"}},
-                "handoff": {"type": "string"},
-            },
-            "required": ["task", "summary"],
-        },
+        "Finish a task you did yourself (assigned to hermes): commits it and records your summary, outputs and decisions.",
+        _obj({"task": _TASK, "summary": {"type": "string"},
+              "outputs": {"type": "array", "items": {"type": "string"}, "description": "Files you made, e.g. [\"assets/logo.png — logo\"]"},
+              "decisions": {"type": "array", "items": {"type": "string"}}, "handoff": {"type": "string"}}, ["task", "summary"]),
     ),
     "thoth_revise": (
-        "Send a task back with the user's feedback (\"make the hero's hair blue\", \"the coin is too dark\"). The same agent "
-        "resumes its own session in the task worktree, the feedback is saved on the task for every later run and review, and "
-        "the result is a new version. Use files to name what to redo.",
-        {
-            "type": "object",
-            "properties": {
-                "project": _PROJECT,
-                "task": _TASK,
-                "feedback": {"type": "string", "description": "What should change, in the user's words"},
-                "files": {"type": "array", "items": {"type": "string"}, "description": "Files to redo, e.g. [\"assets/player.png\"]"},
-                "agent": _WORKER,
-                "model": _MODEL,
-                "effort": _EFFORT,
-            },
-            "required": ["task", "feedback"],
-        },
+        "Send a task back with the user's feedback; the agent continues in its session and makes a new version.",
+        _obj({"task": _TASK, "feedback": {"type": "string", "description": "What should change, in the user's words"},
+              "files": {"type": "array", "items": {"type": "string"}, "description": "Files to redo"},
+              "agent": _WORKER, "model": _MODEL, "effort": _EFFORT}, ["task", "feedback"]),
     ),
     "thoth_restore": (
-        "Bring back an earlier version of a task (a commit from its history, see thoth_status task=...). Recorded as a new "
-        "version, so nothing is lost and the newer one can be restored again.",
-        {"type": "object", "properties": {"project": _PROJECT, "task": _TASK, "commit": {"type": "string", "description": "Commit id of the version to bring back"}}, "required": ["task", "commit"]},
+        "Bring back an earlier version of a task, as a new version.",
+        _obj({"task": _TASK, "commit": {"type": "string", "description": "Commit id of that version"}}, ["task", "commit"]),
     ),
-    "thoth_sync": (
-        "Bring the newest versions of a task's dependencies into its worktree, e.g. after its assets were revised. "
-        "Conflicts are aborted and reported.",
-        {"type": "object", "properties": {"project": _PROJECT, "task": _TASK}, "required": ["task"]},
-    ),
+    "thoth_sync": ("Bring the newest versions of a task's dependencies into it.", _obj({"task": _TASK}, ["task"])),
     "thoth_preview": (
-        "Open what a task built (a web page, a browser game) or, without a task, the project with everything merged: "
-        "Thoth serves it read-only on localhost and returns the link to give the user. Use this instead of starting a "
-        "server, copying files or opening a browser yourself.",
-        {"type": "object", "properties": {"project": _PROJECT, "task": {"type": "string", "description": "Task id like T2; omit for the merged project"}}},
+        "Show the user what a task built (page, game, app) or, without a task, everything merged: returns a localhost link. "
+        "Never start servers or open browsers yourself.",
+        _obj({"task": {"type": "string", "description": "Omit for everything merged"}}),
     ),
-    "thoth_models": (
-        "List the models and reasoning efforts Claude Code and Codex can use here, to pick one per task "
-        "(e.g. Fable for the hard part, Haiku for quick chores).",
-        {"type": "object", "properties": {"project": _PROJECT}},
-    ),
+    "thoth_models": ("Models and efforts Claude Code and Codex can use here.", _obj({})),
     "thoth_coordinator": (
-        "Hand the coordinator role to another AI (hermes, claude or codex). The brain records who coordinates; the "
-        "result explains how to continue from that tool, which reads and drives the same brain through the Thoth MCP server.",
-        {
-            "type": "object",
-            "properties": {
-                "project": _PROJECT,
-                "agent": {"type": "string", "enum": ["hermes", "claude", "codex"]},
-            },
-            "required": ["agent"],
-        },
+        "Hand the coordinator role to hermes, claude or codex; returns how to continue there.",
+        _obj({"agent": {"type": "string", "enum": ["hermes", "claude", "codex"]}}, ["agent"]),
     ),
 }
 
