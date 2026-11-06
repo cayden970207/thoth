@@ -16,6 +16,8 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
+import re
 import threading
 import time
 from pathlib import Path
@@ -23,6 +25,7 @@ from typing import Any
 
 from .thoth_core import __version__
 from .thoth_core import browser as web
+from .thoth_core import chats
 from .thoth_core.agents import driver_for
 from .thoth_core.brain import Brain, BrainError, find_brain_root, parse_id
 from .thoth_core.briefing import board_lines
@@ -33,6 +36,8 @@ from .thoth_core.service import DEFAULT_SETTINGS, Thoth
 logger = logging.getLogger(__name__)
 
 TOOLSET = "thoth"
+# The last line the Thoth page adds to a request typed there, so Hermes knows which project it is about.
+_PAGE_TAG = re.compile(r"\n\s*— via Thoth · ([^\n]+?)\s*$")
 GATED = ("thoth_assign", "thoth_revise", "thoth_review", "thoth_merge")
 TICKET_TTL = 15 * 60
 
@@ -99,6 +104,64 @@ class ThothPlugin:
             return last
         return here
 
+    def project_for(self, args: dict, scope: str = "") -> str:
+        """The project a call is about: the one it names, else the one this chat is bound to, else the default."""
+        named = str(args.get("project") or "").strip()
+        if named:
+            return named
+        with self._lock:
+            bound = self._session_projects.get(scope, "") if scope else ""
+        if not bound and scope:
+            bound = chats.project_of(self._data_dir(), scope)  # bound before Hermes last restarted
+        return bound or self.default_project()
+
+    @staticmethod
+    def _data_dir() -> Path:
+        if os.environ.get("THOTH_DATA_DIR"):  # tests and custom setups
+            return Path(os.environ["THOTH_DATA_DIR"])
+        try:
+            from plugins.plugin_storage import plugin_data_dir
+
+            return Path(plugin_data_dir("thoth"))
+        except Exception:
+            return Path.home() / ".hermes" / "plugin-data" / "thoth"
+
+    def bind_chat(self, session: str, root: str) -> None:
+        """This chat talks about this project: remembered in memory and on disk (for the Desktop side window)."""
+        if not session or not root:
+            return
+        with self._lock:
+            self._session_projects[session] = root
+        try:
+            chats.bind(self._data_dir(), session, root)
+        except Exception:
+            logger.debug("thoth: could not record the chat for %s", root, exc_info=True)
+
+    @staticmethod
+    def _known_projects() -> list[str]:
+        try:
+            from plugins.plugin_storage import plugin_data_dir
+
+            path = plugin_data_dir("thoth") / "projects.json"
+            return [str(p) for p in json.loads(path.read_text(encoding="utf-8"))] if path.exists() else []
+        except Exception:
+            return []
+
+    def _page_project(self, message: Any) -> str:
+        """The project named by a Thoth page request's last line ("— via Thoth · tiny-crm"), as a brain root, else ""."""
+        if isinstance(message, list):  # content parts
+            message = " ".join(str(p.get("text") or "") for p in message if isinstance(p, dict))
+        m = _PAGE_TAG.search(message if isinstance(message, str) else "")
+        if not m:
+            return ""
+        ref = m.group(1).strip()
+        candidates = [str(Path(ref).expanduser())] if ref.startswith(("/", "~")) else [p for p in self._known_projects() if Path(p).name == ref]
+        for path in candidates:
+            root = find_brain_root(path)
+            if root is not None:
+                return str(root)
+        return ""
+
     def remember(self, project: str) -> None:
         root = find_brain_root(project) if project else None
         if root is None:
@@ -151,7 +214,7 @@ class ThothPlugin:
             key = f"thoth:merge{':override' if args.get('override') else ''}:{_short_hash(str(brain.root))}"
             return text, key
         if name == "thoth_review":
-            agent = (args.get("reviewer") or ("codex" if task["agent"] == "claude" else "claude")).lower()
+            agent = (args.get("reviewer") or svc.default_reviewer(task["agent"])).lower()
             kind = "review"
         else:
             agent = (args.get("agent") or task["agent"] or svc.settings["default_agent"]).lower()
@@ -165,7 +228,8 @@ class ThothPlugin:
         minutes = max(1, round(int(svc.settings["run_timeout_seconds"]) / 60))
         if kind == "review":
             builder = _AGENT_LABEL.get(task["agent"], task["agent"].capitalize())
-            head = f"{label} will review {what}, which {builder} built. It only reads; it cannot change anything."
+            fresh = " in a fresh session, since the other agent can't run on this machine" if agent == task["agent"] else ""
+            head = f"{label} will review {what}, which {builder} built{fresh}. It only reads; it cannot change anything."
         elif name == "thoth_revise":
             fb = " ".join(str(args.get("feedback") or "").split())
             head = f"{label} will rework {what} with your feedback: “{fb[:300]}{'…' if len(fb) > 300 else ''}”"
@@ -217,7 +281,7 @@ class ThothPlugin:
         if not self._gated(tool_name, args):
             return None
         svc = self.service()
-        project = str(args.get("project") or "").strip() or self.default_project()
+        project = self.project_for(args, session_id or task_id)
         if self._self_assign(tool_name, args, svc, project):
             return None
         try:
@@ -238,7 +302,7 @@ class ThothPlugin:
         """A gated call the user rejected (or that was blocked) is no longer waiting for an OK."""
         args = dict(args or {})
         if status == "blocked" and self._gated(tool_name, args):
-            project = str(args.get("project") or "").strip() or self.default_project()
+            project = self.project_for(args, str(_.get("session_id") or _.get("task_id") or ""))
             self._mark_waiting(project, "", "")
 
     @staticmethod
@@ -271,8 +335,8 @@ class ThothPlugin:
         def run(args: dict, **kwargs: Any) -> str:
             args = dict(args or {})
             svc = self.service()
-            project = str(args.get("project") or "").strip() or self.default_project()
             scope = str(kwargs.get("session_id") or kwargs.get("task_id") or "")
+            project = self.project_for(args, scope)
             try:
                 if self._gated(name, args) and not self._self_assign(name, args, svc, project):
                     if not self._consume_ticket(name, args, scope):
@@ -285,8 +349,7 @@ class ThothPlugin:
                 self.remember(project)
                 root = find_brain_root(project) if project else None
                 if root is not None and scope:
-                    with self._lock:
-                        self._session_projects[scope] = _rootkey(root)
+                    self.bind_chat(scope, _rootkey(root))
                 if name in ("thoth_assign", "thoth_review", "thoth_revise") and result.get("run") and root is not None:
                     self._bind_run(_rootkey(root), result["run"])
                 if name == "thoth_coordinator":
@@ -387,15 +450,20 @@ class ThothPlugin:
 
     # -- ambient context ---------------------------------------------------------
 
-    def pre_llm_call(self, session_id: str = "", is_first_turn: bool = False, **_: Any) -> dict | None:
+    def pre_llm_call(self, session_id: str = "", is_first_turn: bool = False, user_message: Any = "", **_: Any) -> dict | None:
         """Tell the model a Thoth brain is active here, with a one-line board summary."""
         if not self.settings().get("inject_board", True):
             return None
+        # A request typed on the Thoth page ends with "— via Thoth · <project>": bind this chat to that project.
+        from_page = self._page_project(user_message)
+        if from_page and session_id:
+            self.bind_chat(session_id, from_page)
         here = self.session_dir()
-        root = find_brain_root(here) if here else None
+        root = Path(from_page) if from_page else (find_brain_root(here) if here else None)
         if root is None:
             with self._lock:
                 known = self._session_projects.get(session_id or "")
+            known = known or (chats.project_of(self._data_dir(), session_id) if session_id else "")
             root = find_brain_root(known) if known else None
         if root is None:
             return None
@@ -411,9 +479,20 @@ class ThothPlugin:
             counts[t["status"]] = counts.get(t["status"], 0) + 1
         summary = ", ".join(f"{n} {s}" for s, n in counts.items()) or "no tasks yet"
         lines = [
-            f"[Thoth] This project has a shared multi-agent brain (coordinator: {meta.get('coordinator', 'hermes')}). "
+            f"[Thoth] Project {root.name} ({root}) has a shared multi-agent board (coordinator: {meta.get('coordinator', 'hermes')}). "
             f"Goal: {meta.get('goal') or '(not set)'}. Board: {summary}."
         ]
+        if from_page:
+            lines.append("The user wrote this on the Thoth page, which shows your reply in a small panel: answer in a few short lines, "
+                         "in the user's language, and pass this project folder to Thoth tools.")
+        try:
+            ready = Thoth(settings=self.settings()).workers()
+        except Exception:
+            ready = {}
+        missing = [f"{_AGENT_LABEL.get(a, a)} is {w.get('why')}" for a, w in ready.items() if not w.get("ready")]
+        if missing:
+            lines.append("On this machine " + "; ".join(missing) + ". Plan and review only with the agents that can run here "
+                         "(an agent can review its own kind's work in a fresh session), and tell the user how to add the other if they ask.")
         if running:
             lines.append("Running: " + "; ".join(f"{r['ref']} {r['agent']} {r['kind']} {r['task_ref']}: {r['progress'][:80]}" for r in running))
         try:
@@ -470,9 +549,14 @@ class ThothPlugin:
 
 def doctor_text(settings: dict[str, Any]) -> str:
     lines = [f"Thoth {__version__}"]
+    ready = Thoth(settings=settings).workers(fresh=True)
     for agent in ("claude", "codex"):
         ok, detail = driver_for(agent, settings).available()
-        lines.append(f"  {'✓' if ok else '✗'} {_AGENT_LABEL[agent]}: {detail}")
+        state = ready.get(agent, {})
+        if ok and state.get("why") == "not signed in":
+            lines.append(f"  ✗ {_AGENT_LABEL[agent]}: {detail} — not signed in ({state.get('hint')})")
+        else:
+            lines.append(f"  {'✓' if ok else '✗'} {_AGENT_LABEL[agent]}: {detail}" + (" · signed in" if state.get("signed_in") is True else ""))
     import shutil
 
     lines.append(f"  {'✓' if shutil.which('git') else '✗'} git: {shutil.which('git') or 'not found'}")

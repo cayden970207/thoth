@@ -178,6 +178,19 @@ For a brand-new project, ask for one: Hermes calls `thoth_init(create=true)` and
 and its git repository. A task that depends on several unfinished tasks starts with all of their work
 merged into its branch.
 
+**Talk on the left, watch on the right.** Each project has one chat with Hermes, pinned in the sidebar in
+the project's colour. Beside it, Thoth docks a side window with the whole canvas (drag the divider to
+resize; **Full page** opens the full Thoth page), plus a **Thoth activity** tab with what needs you, who is
+working and what just happened. The side window follows the chat you are looking at, and what you say
+shows up on the canvas as it happens: new tasks appear, a pill shows what Hermes is doing (*Hermes ·
+planning tasks*), the tasks its answer mentions light up, and approvals still happen right there in the
+chat. Typing on the full Thoth page goes to the same project chat and shows Hermes's answer on the page, so
+a project never ends up spread over many chats. **Beside the chat** on the Thoth page opens this layout, and
+Hermes's layout picker gets a **Chat + Thoth** template (sessions, the chat, Thoth) to come back to it any
+time. The side window sits with the chat, like Hermes's browser, so folding Hermes's files, review and
+terminal never hides it. Click a task and its details fill the side window (**‹ Canvas** goes back); once the
+window is wide enough they open in a column beside the canvas instead.
+
 **Seeing the result.** Every task that made a web page or a browser game gets an **Open preview** button
 on the Thoth page (and Hermes has `thoth_preview`). Thoth serves that task's folder on `127.0.0.1`, read-only, never hidden files such
 as `.env`. The **Outputs** view collects everything the team made that you can look at — images, video, sound,
@@ -288,6 +301,12 @@ environment passthrough.
   only) or `codex mcp add thoth …` (Codex's own config, all projects), so that tool can coordinate through
   the bundled MCP server. Thoth changes no other setting of Claude Code or Codex, and reads neither one's
   login: they sign in on their own.
+- **Hermes Desktop layout and chats**: adds two panes (the Thoth side window, docked beside the conversation,
+  and Thoth activity) and one layout template, **Chat + Thoth**, which changes your layout only when you pick
+  it. Closing a pane only hides it, and Layout → Reset brings it back. The first time Thoth sends
+  a project's request it opens a chat for that project, then pins that chat and gives it the project's colour,
+  once (unpin it and it stays unpinned). Which chat belongs to which project is kept in the plugin's data folder
+  (`chats.json`: session ids and project paths only).
 - **Web browsing, only for tasks you give a browser**: the agent's CLI starts `npx -y chrome-devtools-mcp@1.2.0`
   (Google's Chrome DevTools MCP server, downloaded from npm on first use and pinned to that exact version,
   which has no dependencies of its own) with `--no-usage-statistics --no-performance-crux --redactNetworkHeaders`.

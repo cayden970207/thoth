@@ -22,6 +22,12 @@ def _git(cwd, *args):
     subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True)
 
 
+@pytest.fixture(autouse=True)
+def _own_data_dir(tmp_path_factory, monkeypatch):
+    """Tests never touch the user's real Thoth data (chats.json and friends)."""
+    monkeypatch.setenv("THOTH_DATA_DIR", str(tmp_path_factory.mktemp("thoth-data")))
+
+
 @pytest.fixture()
 def repo(tmp_path):
     _git(tmp_path, "init", "-q", "-b", "main")
@@ -660,3 +666,75 @@ def test_npx_runs_with_the_node_next_to_it(tmp_path, monkeypatch):
     monkeypatch.setattr(web, "npx", lambda: str(tmp_path / "local-bin" / "npx"))
     env = web.with_node({"PATH": os.pathsep.join(["/usr/bin", "/bin"])})
     assert env["PATH"].split(os.pathsep)[0] == str(node_bin) and web.with_node(env)["PATH"] == env["PATH"]
+
+
+def test_thoth_plans_and_reviews_around_a_missing_agent(repo, tmp_path, monkeypatch):
+    from thoth_core.agents import ClaudeDriver, CodexDriver
+    fake = tmp_path / "claude"
+    fake.write_text("#!/bin/sh\nexit 0\n")
+    fake.chmod(0o755)
+    monkeypatch.setattr(ClaudeDriver, "signed_in", lambda self: (True, ""))
+    svc = Thoth(mcp_launcher=None, settings={"claude_path": str(fake), "codex_path": str(tmp_path / "no-codex")})
+    w = svc.workers(fresh=True)
+    assert w["claude"]["ready"] and not w["codex"]["ready"] and w["codex"]["why"] == "not installed"
+    svc.init(str(repo))
+    out = svc.plan(str(repo), [{"title": "UI", "agent": "claude"}, {"title": "Tests", "agent": "codex"}])
+    assert out["warnings"] == ["T2 is for Codex, which is not installed on this machine: give it to another agent"]
+    assert svc.default_reviewer("claude") == "claude"  # no Codex here: Claude reviews in a fresh session
+    with pytest.raises(BrainError, match="isn't installed"):
+        svc.assign(str(repo), "T2")
+    # Signed out is reported by the CLI itself, never by reading its credentials.
+    monkeypatch.setattr(CodexDriver, "_ask", lambda self, *a: (1, "Not logged in\n"))
+    monkeypatch.setattr(ClaudeDriver, "_ask", lambda self, *a: (0, '{"loggedIn": false}'))
+    assert CodexDriver({})._ask() and CodexDriver({}).signed_in() == (False, "run `codex login`")
+    monkeypatch.undo()
+    monkeypatch.setattr(ClaudeDriver, "_ask", lambda self, *a: (0, '{"loggedIn": false}'))
+    assert ClaudeDriver({}).signed_in()[0] is False
+
+
+def test_a_request_from_the_thoth_page_binds_its_chat_to_the_project(repo, monkeypatch):
+    plugin = _load_plugin()
+    ctx = FakeCtx()
+    plugin.register(ctx)
+    json.loads(ctx.tools["thoth_init"]({"project": str(repo), "goal": "A tiny CRM"}, session_id="s0"))
+    hook = ctx.hooks["pre_llm_call"]
+    instance = hook.__self__
+    monkeypatch.setattr(instance, "_known_projects", lambda: [str(repo)])
+    monkeypatch.setattr(instance, "session_dir", lambda: "")
+    out = hook(session_id="chat-9", is_first_turn=True, user_message=f"下一步可以做什么？\n\n— via Thoth · {repo.name}")
+    assert out and f"({repo})" in out["context"] and "few short lines" in out["context"]
+    assert instance.project_for({}, "chat-9") == str(repo)
+    by_path = hook(session_id="chat-10", user_message=f"Status?\n\n— via Thoth · {repo}")
+    assert by_path and "A tiny CRM" in by_path["context"]
+    assert hook(session_id="chat-11", user_message="no tag here") is None or "chat-11" not in instance._session_projects
+
+
+def test_each_project_keeps_one_chat_across_restarts(tmp_path):
+    from thoth_core import chats
+    chats.bind(tmp_path, "stored-1", "/p/crm", primary=True)
+    chats.bind(tmp_path, "runtime-1", "/p/crm")
+    chats.bind(tmp_path, "stored-2", "/p/crm")  # another chat that talked about it does not take over
+    assert chats.project_of(tmp_path, "nope", "runtime-1") == "/p/crm"
+    assert chats.chat_of(tmp_path, "/p/crm") == "stored-1"
+    chats.bind(tmp_path, "stored-3", "/p/crm", primary=True)
+    assert chats.chat_of(tmp_path, "/p/crm") == "stored-3" and chats.project_of(tmp_path, "") == ""
+    for i in range(chats.MAX_SESSIONS + 20):
+        chats.bind(tmp_path, f"s{i}", "/p/other")
+    assert len(chats.load(tmp_path)["sessions"]) == chats.MAX_SESSIONS
+
+
+def test_the_plugin_remembers_which_chat_talks_about_which_project(repo, tmp_path, monkeypatch):
+    plugin = _load_plugin()
+    ctx = FakeCtx()
+    plugin.register(ctx)
+    json.loads(ctx.tools["thoth_init"]({"project": str(repo), "goal": "g"}, session_id="s0"))
+    hook = ctx.hooks["pre_llm_call"]
+    inst = hook.__self__
+    monkeypatch.setattr(type(inst), "_data_dir", staticmethod(lambda: tmp_path))
+    monkeypatch.setattr(inst, "_known_projects", lambda: [str(repo)])
+    monkeypatch.setattr(inst, "session_dir", lambda: "")
+    hook(session_id="chat-1", user_message=f"Status?\n\n— via Thoth · {repo.name}")
+    from thoth_core import chats
+    assert chats.project_of(tmp_path, "chat-1") == str(repo)
+    inst._session_projects.clear()  # as after a restart: the chat still knows its project
+    assert inst.project_for({}, "chat-1") == str(repo)

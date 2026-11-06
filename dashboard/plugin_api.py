@@ -68,6 +68,20 @@ def _projects() -> list[str]:
     return [p for p in data if isinstance(p, str) and (Path(p) / ".thoth" / "brain.db").is_file()]
 
 
+def _data_dir() -> Path:
+    import os
+
+    if os.environ.get("THOTH_DATA_DIR"):
+        return Path(os.environ["THOTH_DATA_DIR"])
+    from plugins.plugin_storage import plugin_data_dir
+
+    return Path(plugin_data_dir("thoth"))
+
+
+def _chats():
+    return importlib.import_module(_core().__name__ + ".chats")
+
+
 def _project(project: str) -> str:
     known = _projects()
     if not project:
@@ -100,6 +114,19 @@ def _core_brain(project: str):
     core = _core()
     brain = importlib.import_module(core.__name__ + ".brain")
     return brain.Brain.open(project)
+
+
+@router.get("/chat")
+async def chat(session: str = "", alt: str = "", project: str = "") -> dict[str, Any]:
+    """Which project the chat on screen talks about (by any of its ids), and which chat a project uses."""
+    known = set(_projects())
+    try:
+        mod, data_dir = _chats(), _data_dir()
+        found = mod.project_of(data_dir, session, alt)
+        own = mod.chat_of(data_dir, project) if project in known else ""
+    except Exception:
+        found, own = "", ""
+    return {"project": found if found in known else "", "chat": own}
 
 
 @router.get("/snapshot")
@@ -142,6 +169,12 @@ async def action(body: dict) -> dict[str, Any]:
                                      kind=str(body.get("kind") or ""), role=str(body.get("role") or ""),
                                      model=body.get("model") if "model" in body else None, effort=body.get("effort") if "effort" in body else None,
                                      browser=str(body.get("browser")) if "browser" in body else None)
+        elif kind == "bind_chat":
+            # The page sent this project's request to that chat (or opened it for this project).
+            for sid in [str(body.get("session") or ""), str(body.get("alt") or "")]:
+                if sid:
+                    _chats().bind(_data_dir(), sid, path, primary=bool(body.get("primary")))
+            result = {"project": path}
         elif kind == "plan":
             result = svc.plan(path, body.get("tasks") or [])
         elif kind == "note":

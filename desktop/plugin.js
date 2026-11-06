@@ -270,6 +270,9 @@ const ICONS = {
   alert: 'M12 4l9 16H3zM12 10v4M12 17h.01',
   play: 'M8 5.5v13l10.5-6.5z',
   arrowr: 'M5 12h14M13 6l6 6-6 6',
+  back: 'M15 18l-6-6 6-6',
+  up: 'M6 15l6-6 6 6',
+  down: 'M6 9l6 6 6-6',
   film: 'M4 5h16v14H4zM4 9h16M4 15h16M8 5v4M8 15v4M16 5v4M16 15v4',
   music: 'M9 17V5l10-2v12M9 17a2.5 2.5 0 1 1-5 0 2.5 2.5 0 0 1 5 0zM19 15a2.5 2.5 0 1 1-5 0 2.5 2.5 0 0 1 5 0z',
   globe: 'M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18zM3 12h18M12 3c2.5 2.6 3.8 5.6 3.8 9s-1.3 6.4-3.8 9c-2.5-2.6-3.8-5.6-3.8-9S9.5 5.6 12 3z',
@@ -278,6 +281,7 @@ const ICONS = {
   folder: 'M3.5 6.5h6l2 2h9v10h-17z',
   layers: 'M12 4l8 4.5-8 4.5-8-4.5zM4 13l8 4.5 8-4.5',
   collapse: 'M4 14h6v6M20 10h-6V4M14 10l6.5-6.5M3.5 20.5L10 14',
+  expand: 'M14 4h6v6M10 20H4v-6M20 4l-6.5 6.5M4 20l6.5-6.5',
   target: 'M12 3.5a8.5 8.5 0 1 0 0 17 8.5 8.5 0 0 0 0-17zM12 8.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7z',
   chip: 'M8 8h8v8H8zM5.5 5.5h13v13h-13zM9.5 2.5v3M14.5 2.5v3M9.5 18.5v3M14.5 18.5v3M2.5 9.5h3M2.5 14.5h3M18.5 9.5h3M18.5 14.5h3'
 }
@@ -506,6 +510,8 @@ function Roster ({ snap }) {
   const order = [coord, ...['claude', 'codex', 'hermes'].filter(a => a !== coord)]
   const said = (snap.events || []).filter(e => e.actor === 'hermes')
   const line = a => {
+    const w = (snap.workers || {})[a]
+    if (w && !w.ready) return { off: true, text: w.why === 'not signed in' ? `Not signed in here · ${w.hint}` : `Not installed on this machine` }
     const live = (snap.agents || {})[a]
     if (live && live.busy) return { live: true, text: `${live.kind === 'review' ? 'Reviewing' : 'Building'} ${live.task} · ${humanize(live.say)}` }
     const r = runs.find(x => x.agent === a)
@@ -519,7 +525,7 @@ function Roster ({ snap }) {
     h('div', { className: 'th-wlabel' }, h('span', null, 'Team'), h('span', null, plural(order.length, 'agent'))),
     order.map(a => {
       const l = line(a), n = count(a)
-      return h('div', { key: a, className: 'th-trow', style: { '--c': AGENTS[a].color } },
+      return h('div', { key: a, className: 'th-trow' + (l.off ? ' th-off' : ''), style: { '--c': AGENTS[a].color } },
         h(Mini, { agent: a, size: 22 }),
         h('b', null, AGENTS[a].name, a === coord ? h('em', null, 'coordinator') : null),
         h('span', { className: 'th-twhat' + (l.live ? ' th-live' : ''), title: l.text }, l.live ? h('i', { className: 'th-pulse' }) : null, h('span', null, l.text)),
@@ -598,7 +604,7 @@ function NeedRow ({ n, select, next, inline = false, rich = false, d, snap }) {
       h(Btn, { sm: true, primary: next, onClick: run }, label)))
 }
 
-function Canvas ({ snap, d, selected, select, project }) {
+function Canvas ({ snap, d, selected, select, project, inset = 0, onBackground = null }) {
   const surface = useRef(null)
   const [zoom, setZoom] = useState(1)
   const [auto, setAuto] = useState(true)
@@ -699,7 +705,8 @@ function Canvas ({ snap, d, selected, select, project }) {
   }, [])
   useLayoutEffect(() => {
     if (!auto || !surface.current) return
-    const fit = () => { const el = surface.current; if (el) setZoom(Math.max(0.45, Math.min(1.1, (el.clientWidth - 40) / width, (el.clientHeight - 110) / height))) }
+    // A narrow side window may shrink further, so the whole plan stays in view.
+    const fit = () => { const el = surface.current; if (el) setZoom(Math.max(el.clientWidth < 560 ? 0.32 : 0.45, Math.min(1.1, (el.clientWidth - 40) / width, (el.clientHeight - 110) / height))) }
     fit()
     const ro = new ResizeObserver(fit); ro.observe(surface.current)
     return () => ro.disconnect()
@@ -740,14 +747,37 @@ function Canvas ({ snap, d, selected, select, project }) {
       if (!moving) { moving = true; setAuto(false); if (surface.current) surface.current.classList.add('th-panning') }
       setPan({ x: base.x + dx, y: base.y + dy })
     }
-    const up = () => { removeEventListener('pointermove', move); removeEventListener('pointerup', up); if (surface.current) surface.current.classList.remove('th-panning') }
+    const up = () => {
+      removeEventListener('pointermove', move); removeEventListener('pointerup', up)
+      if (surface.current) surface.current.classList.remove('th-panning')
+      // A plain click on the empty canvas puts away whatever is open over it.
+      if (!moving && onBackground) onBackground()
+    }
     addEventListener('pointermove', move); addEventListener('pointerup', up)
   }
+  // Something covers the bottom of the canvas (the side window's task card): glide the picked card above it,
+  // and back down once the cover is gone.
+  const lifted = useRef(0)
+  useEffect(() => {
+    const el = surface.current
+    if (!el) return
+    if (!inset) {
+      const back = lifted.current
+      lifted.current = 0
+      if (back) setPan(p => ({ ...p, y: p.y + back }))
+      return
+    }
+    const at = selected && pos[selected]
+    if (!at) return
+    const top = 22 + pan.y + at[1] * zoom, bottom = top + NODE_H * zoom
+    const lift = Math.min(bottom - (el.clientHeight - inset - 18), top - 14)
+    if (lift > 0) { lifted.current += lift; setPan(p => ({ ...p, y: p.y - lift })) }
+  }, [selected, inset])
   const agents = snap.agents || {}
   const cursors = Object.entries(agents).filter(([, a]) => a.busy && a.task && pos[a.task])
   const ox = surface.current ? Math.max(10, (surface.current.clientWidth - width * zoom) / 2) : 10
   const node = (id, content, extra = {}) => h('div', {
-    key: id, 'data-id': id, className: 'th-node' + (selected === id ? ' th-sel' : '') + (extra.working ? ' th-working' : '') + (extra.attention ? ' th-attn' : '') + (extra.stack ? ' th-stack' : '') + (flashing(id) ? ' th-flash' : ''), style: { left: pos[id][0], top: pos[id][1] },
+    key: id, 'data-id': id, className: 'th-node' + (selected === id ? ' th-sel' : '') + (extra.working ? ' th-working' : '') + (extra.attention ? ' th-attn' : '') + (extra.stack ? ' th-stack' : '') + (flashing(id) ? ' th-flash' : '') + (mentioned(id) ? ' th-mention' : ''), style: { left: pos[id][0], top: pos[id][1] },
     onPointerDown: drag(id), onClick: e => { const n = e.currentTarget; if (n.dataset.moved) { delete n.dataset.moved; return } if (id !== 'G' && id !== 'M') select(id) }
   }, extra.peek || null, h('div', { className: 'th-nodecard' }, content))
   const goal = snap.meta.goal || 'Shared goal'
@@ -786,8 +816,8 @@ function Canvas ({ snap, d, selected, select, project }) {
       node('M', [
         h('div', { key: 'h', className: 'th-node-hd' }, h('span', { className: 'th-eyebrow' }, h(Icon, { name: 'merge', size: 12 }), h('span', null, 'Main')),
           shipped.length > 2 ? h('button', { className: 'th-fold' + (folding ? '' : ' th-on'), onClick: toggleFold, 'aria-expanded': !folding,
-            title: folding ? `${plural(shipped.length, 'shipped task')} folded in here · click to lay them out` : 'Fold the shipped tasks back into Main' },
-          h(Icon, { name: folding ? 'layers' : 'collapse', size: 12 }), shipped.length) : null),
+            title: folding ? `Show the ${plural(shipped.length, 'shipped task')} folded into Main` : 'Fold the shipped tasks back into Main' },
+          h(Icon, { name: folding ? 'expand' : 'collapse', size: 12 }), shipped.length) : null),
         h('div', { key: 't', className: 'th-main-ttl' }, 'Merge into ' + (snap.meta.base_branch || 'main')),
         h('div', { key: 'm', className: 'th-main-meta' }, h('span', { className: 'th-node-meta' }, all.filter(t => t.status === 'merged').length + ' merged'),
           all.some(t => t.status === 'merged' && ((snap.meta.run || '').trim() || hasPage(d.byTask[t.id]))) ? h('button', { className: 'th-tag th-tagbtn', title: 'Open everything merged so far in your browser', onClick: e => { e.stopPropagation(); openPreview('') } }, h(Icon, { name: 'play', size: 10 }), ' Open') : null),
@@ -855,7 +885,7 @@ function TaskCard ({ t, tk, sel, select, d }) {
   const agent = t.agent || 'claude'
   const open = tk.issues.filter(i => !i.done).length, total = tk.issues.length
   const media = tk.produced.filter(isMedia).slice(0, 4), docs = tk.produced.filter(f => !isMedia(f)).length
-  return h('article', { className: 'th-tcard' + (sel ? ' th-sel' : '') + (tk.open ? ' th-working' : '') + (flashing(t.ref) ? ' th-flash' : ''), draggable: true, onDragStart: e => e.dataTransfer.setData('text/plain', t.ref), onClick: () => select(t.ref) },
+  return h('article', { className: 'th-tcard' + (sel ? ' th-sel' : '') + (tk.open ? ' th-working' : '') + (flashing(t.ref) ? ' th-flash' : '') + (mentioned(t.ref) ? ' th-mention' : ''), draggable: true, onDragStart: e => e.dataTransfer.setData('text/plain', t.ref), onClick: () => select(t.ref) },
     h('div', { className: 'th-top' }, h(Pair, { agent, reviewer: t.status !== 'todo' ? tk.reviewer : null, live: tk.open }),
       h('div', { style: { minWidth: 0, flex: 1 } }, h('div', { className: 'th-ttl' }, t.title), h('div', { className: 'th-role' }, (t.role || KIND_LABEL[t.kind || 'code']) + ' · ' + t.ref,
         t.browser && agent !== 'hermes' ? h('span', { className: 'th-webmark', title: 'Browses the web with ' + webWords(t.browser) }, h(Icon, { name: 'globe', size: 11 })) : null))),
@@ -898,25 +928,13 @@ function Revise ({ t, tk }) {
       h(Btn, { sm: true, primary: true, onClick: send, disabled: !text.trim(), title: 'Send back (⌘↵)' }, 'Send back')))
 }
 
-function Inspector ({ snap, d, selected, tab, setTab, close }) {
-  const [filter, setFilter] = useState('all')
-  if (tab === 'brain') {
-    const kinds = { decision: e => e.type === 'note_decision', review: e => /review/.test(e.type) || e.type === 'note_review', version: e => !!e.commit_sha }
-    const events = [...(snap.events || [])].reverse().filter(e => filter === 'all' || kinds[filter](e)).slice(0, 40)
-    return h('div', { className: 'th-pane' },
-      h('div', { className: 'th-filters' }, ['all', 'decision', 'review', 'version'].map(f => h('button', { key: f, className: filter === f ? 'th-on' : '', onClick: () => setFilter(f) }, f === 'all' ? 'All' : f[0].toUpperCase() + f.slice(1) + 's'))),
-      events.length ? events.map(e => h('div', { key: e.id, className: 'th-ev' },
-        h(Mini, { agent: AGENTS[e.actor] ? e.actor : 'hermes', size: 26 }),
-        h('div', { className: 'th-ev-tx' }, h('b', null, AGENTS[e.actor] ? AGENTS[e.actor].name : e.actor), ' ', prettyEvent(e.message, e.actor),
-          e.commit_sha ? h('span', { className: 'th-q th-mono' }, short(e.commit_sha)) : null,
-          h('time', null, ago(e.ts))))) : h('div', { className: 'th-none' }, 'Decisions, reviews and versions from every agent show up here.'))
-  }
-  const t = (snap.tasks || []).find(x => x.ref === selected)
-  if (!t) return h('div', { className: 'th-pane th-none' }, 'Select a task on the canvas or the board.')
+const agentName = a => (AGENTS[a] || { name: a }).name
+// What a task needs next: one sentence and the buttons that do it (the inspector and the side window's peek).
+function taskNext (snap, d, t) {
   const tk = d.byTask[t.id], agent = t.agent || 'claude'
   const open = tk.issues.filter(i => !i.done).length
   const base = snap.meta.base_branch || 'main'
-  const A = a => (AGENTS[a] || { name: a }).name
+  const A = agentName
   const S = a => A(a).split(' ')[0]
   const p = !tk.stale
   const merge = (primary, override) => h(Btn, { key: override ? 'mo' : 'm', primary, onClick: () => act({ action: 'merge', task: t.ref, override: !!override }, r => `Merged ${t.ref}${override ? ' as it is' : ' into ' + r.merged_into} · ${r.commit.slice(0, 7)}`) }, override ? 'Merge as it is' : 'Merge into ' + base)
@@ -945,6 +963,62 @@ function Inspector ({ snap, d, selected, tab, setTab, close }) {
   }
   const last = tk.runs[tk.runs.length - 1]
   const err = !tk.open && last && ['failed', 'cancelled', 'timeout', 'lost'].includes(last.status) && last.error ? last.error : ''
+  return { hint, btns, last, err }
+}
+const setTaskModel = (t, agent, tk) => v => act({ action: 'update', task: t.ref, model: v.model, effort: v.effort }, () => `${t.ref} will use ${modelLabel(agent, v.model)}${v.effort ? ' · ' + v.effort + ' effort' : ''}`)
+const setTaskWeb = (t, tk) => v => act({ action: 'update', task: t.ref, browser: v }, () => `${t.ref} will work with ${webWords(v)}${tk.open ? ' from its next run' : ''}`)
+
+// The side window's first look at a task: what it is, where it stands and the next step, small enough that
+// the canvas and the picked card stay in view above it. "All details" opens the full inspector in place.
+function TaskPeek ({ snap, d, selected, expand, close }) {
+  const t = (snap.tasks || []).find(x => x.ref === selected)
+  if (!t) return null
+  const tk = d.byTask[t.id], agent = t.agent || 'claude'
+  const { hint, btns, last, err } = taskNext(snap, d, t)
+  const first = name => agentName(name).split(' ')[0]
+  return h('div', { className: 'th-tpk' },
+    h('div', { className: 'th-tpk-hd' },
+      h(Subject, { t, tk, size: 38 }),
+      h('div', { className: 'th-tpk-tx' },
+        h('div', { className: 'th-ieyebrow' }, h('span', null, agentName(agent) + ' · ' + (t.role || KIND_LABEL[t.kind || 'code'])), h('span', { className: 'th-mono' }, t.ref)),
+        h('div', { className: 'th-tpk-ttl', title: t.title }, t.title)),
+      h('button', { className: 'th-ib th-tpk-x', title: 'Close (Esc)', 'aria-label': 'Close', onClick: close }, h(Icon, { name: 'x', size: 15 }))),
+    h('div', { className: 'th-tpk-state' },
+      tk.open
+        ? h('span', { className: 'th-tpk-live', title: tk.open.progress || '' }, h(Mini, { agent: tk.open.agent, size: 18 }), h('b', null, tk.open.kind === 'review' ? 'Reviewing' : 'Working'), h('span', null, humanize(tk.open.progress)), h(Elapsed, { since: tk.open.started_at || tk.open.created_at }))
+        : h(StatusPill, { status: t.status, agent }),
+      !tk.open && hint ? h('span', { className: 'th-tpk-hint', title: hint }, hint) : null),
+    err ? h('div', { className: 'th-tpk-err', title: err }, h(Icon, { name: 'alert', size: 13 }), h('span', null, (last.kind === 'review' ? 'The review stopped: ' : 'The run stopped: ') + err)) : null,
+    h('div', { className: 'th-tpk-facts' },
+      h('span', { className: 'th-tpk-who' }, h(Mini, { agent, size: 18 }), first(agent), h('span', { className: 'th-tpk-sep' }, 'builds ·'), h(Mini, { agent: tk.reviewer, size: 18 }), first(tk.reviewer), h('span', { className: 'th-tpk-sep' }, 'reviews')),
+      h(ModelPicker, { agent, model: t.model || '', effort: t.effort || '', onChange: setTaskModel(t, agent, tk), compact: true }),
+      h(WebPicker, { agent, value: t.browser || '', onChange: setTaskWeb(t, tk) })),
+    h('div', { className: 'th-tpk-act' },
+      btns,
+      h('span', { className: 'th-ospacer' }),
+      h('button', { className: 'th-tpk-more', onClick: expand }, 'All details', h(Icon, { name: 'up', size: 13 }))))
+}
+
+function Inspector ({ snap, d, selected, tab, setTab, close }) {
+  const [filter, setFilter] = useState('all')
+  if (tab === 'brain') {
+    const kinds = { decision: e => e.type === 'note_decision', review: e => /review/.test(e.type) || e.type === 'note_review', version: e => !!e.commit_sha }
+    const events = [...(snap.events || [])].reverse().filter(e => filter === 'all' || kinds[filter](e)).slice(0, 40)
+    return h('div', { className: 'th-pane' },
+      h('div', { className: 'th-filters' }, ['all', 'decision', 'review', 'version'].map(f => h('button', { key: f, className: filter === f ? 'th-on' : '', onClick: () => setFilter(f) }, f === 'all' ? 'All' : f[0].toUpperCase() + f.slice(1) + 's'))),
+      events.length ? events.map(e => h('div', { key: e.id, className: 'th-ev' },
+        h(Mini, { agent: AGENTS[e.actor] ? e.actor : 'hermes', size: 26 }),
+        h('div', { className: 'th-ev-tx' }, h('b', null, AGENTS[e.actor] ? AGENTS[e.actor].name : e.actor), ' ', prettyEvent(e.message, e.actor),
+          e.commit_sha ? h('span', { className: 'th-q th-mono' }, short(e.commit_sha)) : null,
+          h('time', null, ago(e.ts))))) : h('div', { className: 'th-none' }, 'Decisions, reviews and versions from every agent show up here.'))
+  }
+  const t = (snap.tasks || []).find(x => x.ref === selected)
+  if (!t) return h('div', { className: 'th-pane th-none' }, 'Select a task on the canvas or the board.')
+  const tk = d.byTask[t.id], agent = t.agent || 'claude'
+  const open = tk.issues.filter(i => !i.done).length
+  const base = snap.meta.base_branch || 'main'
+  const A = agentName
+  const { hint, btns, last, err } = taskNext(snap, d, t)
   const vers = [...tk.versions].reverse()
   return h('div', { className: 'th-pane' },
     h('div', { className: 'th-ihead' }, h(Subject, { t, tk, size: 40 }),
@@ -1189,6 +1263,7 @@ function ThothPage () {
         s.projects.length > 1 ? h(ProjectSwitcher, { s, current: project }) : h('b', null, project.name),
         h('span', { className: 'th-mono th-muted' }, snap.meta.base_branch)),
       h('span', { className: 'th-sync' + (busy ? '' : ' th-idle') }, h(Icon, { name: 'sync', size: 14 }), busy ? 'Syncing live' : 'Up to date'),
+      h('button', { className: 'th-chip', title: 'Open this project’s chat with Thoth beside it', onClick: openBeside }, h(Icon, { name: 'layers', size: 14 }), 'Beside the chat'),
       h(Connect, null),
       h('button', { className: 'th-chip', title: 'Hand coordination to ' + AGENTS[nextCoord].name, onClick: () => act({ action: 'coordinator', agent: nextCoord }, r => `${AGENTS[r.coordinator].name} coordinates now. Hermes can print the setup command.`) },
         h(Mini, { agent: coord, size: 18 }), AGENTS[coord].name, h('span', { className: 'th-chipk' }, 'coordinates'))),
@@ -1213,6 +1288,7 @@ function ThothPage () {
       h('section', { className: 'th-workspace' + (view !== 'canvas' ? ' th-boardmode' : '') + (open ? ' th-open' : '') },
         h('div', { className: 'th-surface' },
           view === 'canvas' ? h(Canvas, { snap, d, selected: sel, select, project: s.project }) : view === 'board' ? h(Board, { snap, d, selected: sel, select, askMerge: setConfirm }) : h(Outputs, { snap, d }),
+          h(HermesAtWork),
           confirm ? h('div', { className: 'th-confirm' }, h('span', null, `Merge ${confirm} into ${snap.meta.base_branch}?`),
             h(Btn, { sm: true, primary: true, onClick: () => { const ref = confirm; return act({ action: 'merge', task: ref }, r => `Merged ${ref} · ${r.commit.slice(0, 7)}`).then(() => setConfirm('')) } }, 'Merge'),
             h('button', { className: 'th-btn th-sm', onClick: () => setConfirm('') }, 'Cancel')) : null,
@@ -1234,18 +1310,173 @@ function ThothPage () {
     h(CommandBar, { snap, project, d }))
 }
 
+// The Thoth side window: the whole canvas in a pane beside the chat, following the chat on screen.
+function useChatProject () {
+  const stored = useAtom(host.state && host.state.focusedStoredSessionId)
+  const runtime = useAtom(host.state && host.state.focusedSessionId)
+  useEffect(() => {
+    if (!ctxRef || (!stored && !runtime)) return
+    let gone = false
+    ctxRef.rest(`/chat?session=${encodeURIComponent(stored || '')}&alt=${encodeURIComponent(runtime || '')}`)
+      .then(r => { if (!gone && r && r.project && r.project !== store.project) switchProject(r.project) }).catch(() => {})
+    return () => { gone = true }
+  }, [stored, runtime])
+  return stored || runtime || ''
+}
+
+function SideHead ({ s, snap, onFull }) {
+  const project = s.projects.find(p => p.path === s.project) || { name: projectName(snap.project) }
+  const tasks = snap.tasks || [], merged = tasks.filter(t => t.status === 'merged').length
+  const busy = Object.values(snap.agents || {}).some(a => a.busy)
+  return h('header', { className: 'th-sidehead' },
+    s.projects.length > 1 ? h(ProjectSwitcher, { s, current: project }) : h('b', { className: 'th-sidename' }, project.name),
+    h('span', { className: 'th-muted' }, `${merged} of ${tasks.length} shipped`),
+    h('span', { className: 'th-sync' + (busy ? '' : ' th-idle') }, h(Icon, { name: 'sync', size: 13 }), busy ? 'Live' : 'Up to date'),
+    h('span', { className: 'th-ospacer' }),
+    h('button', { className: 'th-chip', title: 'Open the full Thoth page', onClick: onFull }, h(Icon, { name: 'expand', size: 13 }), 'Full page'))
+}
+
+function SideAsk ({ snap, chat }) {
+  let ask = null
+  try { ask = JSON.parse(snap.meta.pending_approval || 'null') } catch (e) {}
+  if (!ask || !ask.summary || Date.now() / 1000 - ask.at > 600 || store.dismissedAsk === ask.at) return null
+  const here = !ask.session || ask.session === chat || ask.session === focusedChat()
+  return h('div', { className: 'th-banner th-banner-ask', role: 'status' }, h(Tick),
+    h('span', null, h('b', null, here ? 'Your OK, in the chat ← · ' : 'Hermes needs your OK · '), ask.summary),
+    here ? null : h('button', { className: 'th-btn th-sm th-primary', onClick: () => openChat(ask.session) }, 'Open chat'))
+}
+
+// Beside the chat the side window is narrow. Picking a task raises a small card from the bottom (what it is,
+// where it stands, the next step) while the canvas and the picked card stay in view; "All details" grows it into
+// the full inspector, Esc or a click on the canvas puts it away. A wide side window shows the details as a
+// column next to the canvas instead.
+const SIDE_VIEWS = { canvas: 'Canvas', board: 'Board', outputs: 'Outputs' }
+const SIDE_WIDE = 860
+function ThothSide () {
+  const s = useStore()
+  const chat = useChatProject()
+  const [view, setView] = useState('canvas')
+  const [selected, setSelected] = useState('')
+  const [open, setOpen] = useState(false)
+  const [full, setFull] = useState(false)
+  const [confirm, setConfirm] = useState('')
+  const [wide, setWide] = useState(false)
+  const [sheetH, setSheetH] = useState(0)
+  const root = useRef(null), sheet = useRef(null)
+  useEffect(() => { refresh(); followHermes() }, [])
+  useEffect(() => { if (sheet.current) sheet.current.scrollTop = 0 }, [selected, full])
+  // Keyboard focus follows the card, so Esc steps back from wherever the last click left it.
+  useEffect(() => { if (open && sheet.current) { try { sheet.current.focus({ preventScroll: true }) } catch (e) {} } }, [open, full, selected])
+  useLayoutEffect(() => {
+    const el = root.current
+    if (!el || typeof ResizeObserver !== 'function') return
+    const ro = new ResizeObserver(() => setWide(el.clientWidth >= SIDE_WIDE))
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [!!s.snap])
+  useLayoutEffect(() => {
+    // The card's settled height (not every frame of its grow/shrink animation) tells the canvas what it covers.
+    const el = sheet.current
+    if (!el || typeof ResizeObserver !== 'function') return
+    let timer = 0
+    const settled = () => { const ws = el.parentElement; if (ws && !ws.classList.contains('th-full') && !ws.classList.contains('th-wide')) setSheetH(el.offsetHeight) }
+    const ro = new ResizeObserver(() => { clearTimeout(timer); timer = setTimeout(settled, 140) })
+    ro.observe(el)
+    return () => { clearTimeout(timer); ro.disconnect() }
+  }, [!!s.snap])
+  // The activity tab asks for a task: show it here.
+  const pick = s.sidePick
+  useEffect(() => { if (pick && pick.ref) { store.sidePick = null; setView('canvas'); setSelected(pick.ref); setOpen(true) } }, [pick && pick.at])
+  const css = [h('style', { key: 's' }, CSS), h(LogoSprite, { key: 'l' })]
+  if (!s.snap) {
+    return h('div', { className: 'th-root th-side' }, css, h('div', { className: 'th-sideempty' },
+      h('div', { className: 'th-onb-logos' }, ['claude', 'hermes', 'codex'].map(a => h(Mini, { key: a, agent: a, size: a === 'hermes' ? 40 : 30 }))),
+      h('b', null, s.error ? 'Thoth is reconnecting…' : 'No Thoth project here yet'),
+      h('span', null, s.error ? 'It comes back by itself in a moment.' : 'Tell Hermes in this chat what to build, e.g. “Start a Thoth project: a landing page for my bakery.” The work shows up here as it happens.')))
+  }
+  const snap = s.snap, d = derive(snap)
+  const sel = selected || ((snap.needs || [])[0] || {}).task || ''
+  const select = ref => { setSelected(ref); setOpen(true) }
+  const close = () => { setOpen(false); setFull(false) }
+  const show = v => { setView(v); close() }
+  const needs = snap.needs || []
+  const peek = open && !wide && !full
+  const segBtn = (v, icon) => h('button', { key: v, className: view === v ? 'th-on' : '', title: SIDE_VIEWS[v], 'aria-label': SIDE_VIEWS[v], 'aria-pressed': view === v, onClick: () => show(v) }, h(Icon, { name: icon }), h('span', { className: 'th-seglbl' }, SIDE_VIEWS[v]))
+  const onKey = e => {
+    if (e.key !== 'Escape' || !open) return
+    e.stopPropagation()
+    if (full && !wide) setFull(false); else close()
+  }
+  return h('div', { className: 'th-root th-side', ref: root, onKeyDown: onKey }, css,
+    h(SideHead, { s, snap, onFull: () => host.navigate('/thoth') }),
+    h('div', { className: 'th-sidebody' },
+      h(SideAsk, { snap, chat }),
+      needs.length ? h('div', { className: 'th-card th-sideneed' }, h(NeedRow, { n: needs[0], select, next: true, inline: true }),
+        needs.length > 1 ? h('span', { className: 'th-muted th-sidemore' }, '+' + (needs.length - 1) + ' more') : null) : null,
+      h('section', { className: 'th-sidews' + (open ? ' th-open' : '') + (wide ? ' th-wide' : '') + (full ? ' th-full' : '') },
+        h('div', { className: 'th-surface' },
+          view === 'canvas' ? h(Canvas, { snap, d, selected: open ? sel : '', select, project: s.project, inset: peek ? sheetH + 10 : 0, onBackground: open ? close : null })
+            : view === 'board' ? h(Board, { snap, d, selected: open ? sel : '', select, askMerge: setConfirm }) : h(Outputs, { snap, d }),
+          h(HermesAtWork),
+          confirm ? h('div', { className: 'th-confirm' }, h('span', null, `Merge ${confirm} into ${snap.meta.base_branch}?`),
+            h(Btn, { sm: true, primary: true, onClick: () => { const ref = confirm; return act({ action: 'merge', task: ref }, r => `Merged ${ref} · ${r.commit.slice(0, 7)}`).then(() => setConfirm('')) } }, 'Merge'),
+            h('button', { className: 'th-btn th-sm', onClick: () => setConfirm('') }, 'Cancel')) : null,
+          h('div', { className: 'th-dock' },
+            h('div', { className: 'th-seg th-seg-plain' }, segBtn('canvas', 'canvas'), segBtn('board', 'board'), segBtn('outputs', 'grid')),
+            h('span', { className: 'th-dockdiv' }),
+            h(AddTask, { snap }))),
+        h('aside', { className: 'th-card th-sidesheet', ref: sheet, tabIndex: -1, role: 'dialog', 'aria-label': 'Task details', 'aria-hidden': !open },
+          !open ? null
+            : peek ? [
+              h('button', { key: 'g', className: 'th-grab', 'aria-label': 'Show all details', title: 'Show all details', onClick: () => setFull(true) }),
+              h(TaskPeek, { key: 'p', snap, d, selected: sel, expand: () => setFull(true), close })
+            ] : [
+              wide ? null : h('button', { key: 'g', className: 'th-grab', 'aria-label': 'Show less', title: 'Show less', onClick: () => setFull(false) }),
+              h('div', { key: 'tools', className: 'th-sheettools' },
+                wide ? null : h('button', { className: 'th-ib', title: 'Show less (Esc)', 'aria-label': 'Show less', onClick: () => setFull(false) }, h(Icon, { name: 'down', size: 15 })),
+                h('button', { className: 'th-ib', title: 'Close' + (wide ? ' (Esc)' : ''), 'aria-label': 'Close', onClick: close }, h(Icon, { name: 'x', size: 15 }))),
+              h('div', { key: 'i', className: 'th-inspector th-sheetbody' }, h(Inspector, { snap, d, selected: sel, tab: 'task', setTab: () => {} }))
+            ])),
+      s.viewer ? h(Viewer, { v: s.viewer, snap, close: () => { store.viewer = null; emit() } }) : null))
+}
+
+// A compact companion pane: what needs you, who is working, what just happened.
+function ThothActivity () {
+  const s = useStore()
+  useChatProject()
+  useEffect(() => { refresh(); followHermes() }, [])
+  const css = [h('style', { key: 's' }, CSS), h(LogoSprite, { key: 'l' })]
+  if (!s.snap) return h('div', { className: 'th-root th-side' }, css, h('div', { className: 'th-sideempty' }, h('b', null, 'No Thoth project here yet')))
+  const snap = s.snap, d = derive(snap)
+  // A task picked here opens in the Thoth tab next door, so the chat stays where it is.
+  const select = ref => { if (ref) { store.sidePick = { ref, at: Date.now() }; emit() } showSide() }
+  const events = [...(snap.events || [])].slice(-12).reverse()
+  return h('div', { className: 'th-root th-side th-activity' }, css,
+    h(SideHead, { s, snap, onFull: () => host.navigate('/thoth') }),
+    h('div', { className: 'th-sidebody' },
+      h(NeedsWidget, { snap, d, select }),
+      h(Roster, { snap }),
+      h('div', { className: 'th-card th-widget' }, h('div', { className: 'th-wlabel' }, h('span', null, 'Just now')),
+        events.length ? events.map(e => h('div', { key: e.id, className: 'th-evrow' }, h(Mini, { agent: AGENTS[e.actor] ? e.actor : 'hermes', size: 18 }),
+          h('span', null, capFirst(prettyEvent(e.message, e.actor))), h('em', null, ago(e.ts)))) : h('div', { className: 'th-calm' }, h('span', null, 'Nothing yet.')))))
+}
+
 const pause = ms => new Promise(r => setTimeout(r, ms))
 const focusedChat = () => { try { return host.state.focusedSessionId && host.state.focusedSessionId.get() } catch (e) { return null } }
-// Send a request to Hermes without leaving the Thoth page when possible:
-// 1. a chat that is on screen beside Thoth, 2. this project's chat from last time if it is on screen,
-// 3. a new chat tab (the Thoth page stays open in its own tab), 4. a new chat in place.
-// Each step addresses one exact session, so a request never lands in an unrelated chat.
+// Send a request to Hermes in THIS project's chat, so each project keeps one conversation:
+// 1. that chat is on screen (beside Thoth): send it there; 2. open that chat and send; 3. the first time,
+// a new chat tab that becomes the project's chat. Each step addresses one exact session, never an unrelated chat.
 async function sendToHermes (text) {
-  const before = focusedChat()
-  if (before && host.composer && host.composer.submit(before, text)) return { where: 'open', session: before }
-  let saved = ''
-  try { saved = ctxRef.storage && ctxRef.storage.get ? await ctxRef.storage.get('chat:' + store.project) : '' } catch (e) {}
-  if (saved && saved !== before && host.composer && host.composer.submit(saved, text)) return { where: 'same', session: saved }
+  const own = await projectChat()
+  const runtime0 = focusedChat(), stored0 = focusedStored()
+  if (own && ((own.stored && own.stored === stored0) || (own.runtime && own.runtime === runtime0)) && host.composer && host.composer.submit(stored0 || runtime0, text)) return { where: 'open', session: runtime0, stored: stored0 }
+  if (own && own.stored && host.openSession) {
+    try { host.openSession(own.stored, { intent: 'tab' }) } catch (e) {}
+    for (let i = 0; i < 30; i++) {
+      await pause(120)
+      if (focusedStored() === own.stored && host.composer && host.composer.submit(own.stored, text)) return { where: 'same', session: focusedChat(), stored: own.stored }
+    }
+  }
   if (ctxRef.runAction) {
     let opened = null
     try { opened = await ctxRef.runAction('session.newTab') } catch (e) {}
@@ -1253,14 +1484,14 @@ async function sendToHermes (text) {
       for (let i = 0; i < 30; i++) {
         await pause(120)
         const now = focusedChat()
-        if (now && now !== before && host.composer && host.composer.submit(now, text)) return { where: 'tab', session: now }
+        if (now && now !== runtime0 && host.composer && host.composer.submit(now, text)) { await pause(400); return { where: 'tab', session: now, stored: focusedStored(), fresh: true } }
       }
     }
     ctxRef.runAction('session.new')
   }
   for (let i = 0; i < 20; i++) {
     await pause(150)
-    if (host.composer && host.composer.submit('new', text)) return { where: 'new', session: focusedChat() }
+    if (host.composer && host.composer.submit('new', text)) { await pause(400); return { where: 'new', session: focusedChat(), stored: focusedStored(), fresh: true } }
   }
   if (host.composer && await host.composer.setDraft(null, text)) return { where: 'draft', session: null }
   return { where: '', session: null }
@@ -1272,9 +1503,124 @@ function openChat (session) {
   return false
 }
 
+const focusedStored = () => { try { return host.state.focusedStoredSessionId && host.state.focusedStoredSessionId.get() } catch (e) { return null } }
+// A host atom as React state (subscribe / listen, else a slow poll on older hosts).
+function useAtom (atom) {
+  const read = () => { try { return atom && atom.get ? atom.get() : null } catch (e) { return null } }
+  const [v, setV] = useState(read)
+  useEffect(() => {
+    if (!atom) return
+    try { if (atom.subscribe) return atom.subscribe(x => setV(x)); if (atom.listen) return atom.listen(x => setV(x)) } catch (e) {}
+    const t = setInterval(() => setV(read()), 1000)
+    return () => clearInterval(t)
+  }, [atom])
+  return v
+}
+// Each project has ONE chat with Hermes: { stored, runtime }, remembered here and by the backend.
+async function projectChat (project = store.project) {
+  let own = null
+  try { own = JSON.parse((await ctxRef.storage.get('chat2:' + project)) || 'null') } catch (e) {}
+  if (!own || !own.stored) { try { const r = await ctxRef.rest('/chat?project=' + encodeURIComponent(project)); if (r && r.chat) own = { stored: r.chat } } catch (e) {} }
+  return own && (own.stored || own.runtime) ? own : null
+}
+const PROJECT_COLORS = ['#D9774F', '#2F6FEB', '#13893F', '#6B52D6', '#B86E00', '#0E7C86']
+const projectColor = p => { let n = 0; for (const c of String(p)) n = (n * 31 + c.charCodeAt(0)) >>> 0; return PROJECT_COLORS[n % PROJECT_COLORS.length] }
+async function rememberChat (project, stored, runtime, fresh) {
+  // A brand-new chat gets its durable id once Hermes has saved it; Thoth's backend learns it from the first message.
+  for (let i = 0; fresh && !stored && i < 25; i++) {
+    await pause(600)
+    try { const r = await ctxRef.rest('/chat?project=' + encodeURIComponent(project)); if (r && r.chat) stored = r.chat } catch (e) {}
+  }
+  if (!ctxRef || (!stored && !runtime)) return
+  try { ctxRef.storage.set('chat2:' + project, JSON.stringify({ stored: stored || '', runtime: runtime || '' })) } catch (e) {}
+  ctxRef.rest('/action', { method: 'POST', body: { action: 'bind_chat', project, session: stored || runtime, alt: stored ? (runtime || '') : '', primary: true } }).catch(() => {})
+  if (!stored || !host.sessions) return
+  // The project's chat sits pinned at the top of the sidebar, in the project's colour — once: if you unpin it, it stays unpinned.
+  let done = ''
+  try { done = await ctxRef.storage.get('pinned:' + stored) } catch (e) {}
+  if (done) return
+  try { host.sessions.pin(stored, true) } catch (e) {}
+  try { host.sessions.setColor(stored, projectColor(project)) } catch (e) {}
+  try { ctxRef.storage.set('pinned:' + stored, '1') } catch (e) {}
+}
+// Open this project's chat with the Thoth side window beside it: talk on the left, watch the work on the right.
+async function openBeside () {
+  const own = await projectChat()
+  try {
+    if (own && own.stored && host.openSession) host.openSession(own.stored, { intent: 'stack' })
+    else if (ctxRef.runAction) await ctxRef.runAction('session.newTab')
+  } catch (e) {}
+  await pause(250)
+  showSide()
+}
+// Bring the Thoth side window on screen (and to the front of its tabs) without touching Hermes's other panels.
+function showSide () {
+  try { if (typeof host.revealPane === 'function') { host.revealPane('thoth:canvas'); return } } catch (e) {}
+  const seen = host.paneVisibility ? host.paneVisibility('thoth:canvas') : null
+  if (!(seen && seen.get && seen.get()) && ctxRef && ctxRef.runAction) { try { Promise.resolve(ctxRef.runAction('view.toggleRightSidebar')).catch(() => {}) } catch (e) {} }
+}
+
+// What Hermes is doing for the chat on screen, mirrored on the canvas: the Thoth tool it is running, and the
+// tasks its last answer talked about (their cards light up for a few seconds).
+const HERMES_DOING = { thoth_plan: 'planning tasks', thoth_assign: 'starting an agent', thoth_review: 'asking for a review', thoth_revise: 'sending work back',
+  thoth_merge: 'merging', thoth_wait: 'waiting for the agents', thoth_status: 'reading the board', thoth_context: 'reading a brief', thoth_note: 'noting a decision',
+  thoth_update_task: 'editing a task', thoth_sync: 'updating a task', thoth_preview: 'opening a preview', thoth_init: 'setting up the project', thoth_complete: 'finishing its own task' }
+store.hermes = null; store.mention = null
+let hermesOffs = []
+function followHermes () {
+  const on = ctxRef && ctxRef.onEvent
+  if (!on || hermesOffs.length) return
+  const here = ev => !ev || !ev.session_id || !focusedChat() || ev.session_id === focusedChat()
+  hermesOffs = [
+    on('tool.start', ev => {
+      const name = String((ev && ev.payload && ev.payload.name) || '').replace(/^mcp__\w+__/, '')
+      if (name.startsWith('thoth_') && here(ev)) { store.hermes = { doing: HERMES_DOING[name] || 'working', at: Date.now() }; emit() }
+    }),
+    on('message.complete', ev => {
+      if (!here(ev)) return
+      const refs = [...new Set(String((ev && ev.payload && ev.payload.text) || '').match(/\bT\d{1,3}\b/g) || [])]
+      store.hermes = null
+      if (refs.length) { store.mention = { refs, at: Date.now() }; setTimeout(emit, 6200) }
+      emit()
+    }),
+  ].filter(off => typeof off === 'function')
+}
+const mentioned = ref => !!(store.mention && Date.now() - store.mention.at < 6000 && store.mention.refs.includes(ref))
+function HermesAtWork () {
+  useStore()
+  const w = store.hermes
+  if (!w || Date.now() - w.at > 120000) return null
+  return h('div', { className: 'th-hermeswork', role: 'status' }, h(Mini, { agent: 'hermes', size: 20 }), h('span', null, 'Hermes · ' + w.doing), h('i', { className: 'th-dots' }, h('b'), h('b'), h('b')))
+}
+
+// What Hermes answers to a request typed here, shown above the composer so nobody has to leave the page.
+const plainReply = text => String(text || '').replace(/\*\*(.+?)\*\*/g, '$1').replace(/^#{1,6}\s*/gm, '').replace(/^\s*[-*]\s+/gm, '• ').trim()
+// Kept per project outside the page, so the quick trip through a chat tab (or switching pages) loses nothing.
+store.chats = {}
+let chatOffs = []
+function followChat (project, session, q) {
+  store.chats[project] = { session, q, text: '', tool: '', done: false }
+  emit()
+  const on = (ctxRef && ctxRef.onEvent) || host.onEvent
+  if (chatOffs.length || !on) return
+  // One set of listeners for every chat started here; each event goes to the open chat it belongs to.
+  const update = (ev, change) => {
+    const hit = Object.entries(store.chats).find(([, c]) => !c.done && (!ev || !ev.session_id || !c.session || ev.session_id === c.session))
+    if (hit) { store.chats[hit[0]] = change(hit[1]); emit() }
+  }
+  chatOffs = [
+    on('message.delta', ev => { const s = ev && ev.payload && ev.payload.text; if (typeof s === 'string') update(ev, c => ({ ...c, text: c.text + s, tool: '' })) }),
+    on('tool.start', ev => { const n = ev && ev.payload && ev.payload.name; if (n) update(ev, c => ({ ...c, tool: String(n).replace(/^mcp__\w+__/, '') })) }),
+    on('message.complete', ev => { const s = ev && ev.payload && ev.payload.text; update(ev, c => ({ ...c, done: true, tool: '', text: typeof s === 'string' && s.trim() ? s : c.text })) }),
+  ].filter(off => typeof off === 'function')
+}
+
 function CommandBar ({ snap, project, d }) {
   const [text, setText] = useState('')
   const [sending, setSending] = useState(false)
+  useStore()
+  const chat = store.chats[snap.project] || null
+  const setChat = v => { if (v) store.chats[snap.project] = v; else delete store.chats[snap.project]; emit() }
   const tasks = snap.tasks || []
   const built = tasks.filter(t => ['built', 'changes'].includes(t.status)).map(t => t.ref)
   const ready = tasks.filter(t => t.status === 'approved').map(t => t.ref)
@@ -1289,20 +1635,35 @@ function CommandBar ({ snap, project, d }) {
     const body = (value || text).trim()
     if (!body || sending) return
     setSending(true)
-    const msg = `[From the Thoth page. Project open there: ${project.name} (${snap.project}). You coordinate with the Thoth tools; Claude Code and Codex do the work.] ${body}`
-    const { where, session } = await sendToHermes(msg)
+    // Your words come first (they name the chat); the last line tells Hermes which project, by folder name
+    // unless two projects share it.
+    const base = (snap.project || '').split('/').filter(Boolean).pop() || project.name
+    const tag = (store.projects || []).filter(p => (p.path || '').split('/').pop() === base).length > 1 ? snap.project : base
+    const project0 = snap.project
+    const { where, session, stored, fresh } = await sendToHermes(`${body}\n\n— via Thoth · ${tag}`)
     setSending(false)
     if (!where) { host.notify({ kind: 'warning', message: 'Open a Hermes chat, then try again' }); return }
     setText('')
-    if (session) { try { ctxRef.storage.set('chat:' + store.project, session) } catch (e) {} }
-    const back = { label: 'Back to Thoth', onClick: () => host.navigate('/thoth') }
-    host.notify(where === 'open' || where === 'same' ? { kind: 'info', message: 'Sent to Hermes — the work shows up here as it happens' }
-      : where === 'tab' ? { kind: 'info', message: 'Hermes is on it in a new tab. Approve agent launches there; this page keeps showing the work.', action: back }
-        : where === 'new' ? { kind: 'info', message: 'Sent to Hermes in a new chat. Approve agent launches there.', action: back }
-          : { kind: 'info', message: 'Put in the Hermes composer — press Enter to send' })
+    if (where === 'draft') { host.notify({ kind: 'info', message: 'Put in the Hermes composer — press Enter to send' }); return }
+    rememberChat(project0, stored, session, fresh)
+    followChat(project0, session, body)
+    if (where !== 'open') {
+      // Hermes only takes text through a chat on screen, so the request went out through this project's chat; come straight back.
+      setTimeout(() => { try { host.navigate('/thoth') } catch (e) {} }, 900)
+      host.notify({ kind: 'info', message: fresh ? 'Sent to Hermes in this project’s new chat (pinned in the sidebar). Its answer shows here.' : 'Sent to Hermes in this project’s chat. Its answer shows here.',
+        action: { label: 'Open beside the chat', onClick: openBeside } })
+    }
   }
+  const reply = chat ? h('div', { className: 'th-reply' + (chat.done ? '' : ' th-reply-live') },
+    h('div', { className: 'th-reply-q' }, h('span', null, chat.q)),
+    h('div', { className: 'th-reply-a' }, h(Mini, { agent: 'hermes', size: 20 }),
+      chat.text ? h('div', { className: 'th-reply-text' }, plainReply(chat.text))
+        : h('div', { className: 'th-reply-text th-muted' }, chat.tool ? `Working · ${chat.tool}` : 'Thinking…')),
+    h('div', { className: 'th-reply-ft' },
+      h('button', { className: 'th-linkbtn', onClick: openBeside }, 'Open beside the chat'),
+      h('button', { className: 'th-linkbtn', onClick: () => setChat(null) }, chat.done ? 'Close' : 'Hide'))) : null
   return h('section', { className: 'th-cmd th-composer' },
-    chips.length ? h('div', { className: 'th-cmd-chips' }, chips.map(c => h('button', { key: c, className: 'th-cmd-chip', title: 'Send to Hermes: ' + c, onClick: () => send(c) }, c))) : null,
+    reply || (chips.length ? h('div', { className: 'th-cmd-chips' }, chips.map(c => h('button', { key: c, className: 'th-cmd-chip', title: 'Send to Hermes: ' + c, onClick: () => send(c) }, c))) : null),
     h('div', { className: 'th-cmd-box' },
       h(Mini, { agent: 'hermes', size: 26 }),
       h('kbd', { className: 'th-kbd', title: 'Press / to type here' }, '/'),
@@ -1461,7 +1822,10 @@ function AddTask ({ snap, onDone }) {
       h('input', { className: 'th-field', autoFocus: true, placeholder: 'What should be done? e.g. Add a pause menu', value: f.title, onChange: e => set({ title: e.target.value }), onKeyDown: e => { if (e.key === 'Enter') submit() } }),
       h('textarea', { className: 'th-textarea', rows: 2, placeholder: 'Details and what “done” looks like (optional)', value: f.detail, onChange: e => set({ detail: e.target.value }) }),
       h('div', { className: 'th-mm-sec' }, 'Who does it'),
-      h('div', { className: 'th-agentpick th-agentpick-lg' }, ['claude', 'codex', 'hermes'].map(a => h('button', { key: a, className: f.agent === a ? 'th-on' : '', onClick: () => set({ agent: a, model: '', effort: '' }) }, h(Mini, { agent: a, size: 20 }), AGENTS[a].name.split(' ')[0]))),
+      h('div', { className: 'th-agentpick th-agentpick-lg' }, ['claude', 'codex', 'hermes'].map(a => {
+        const w = (snap.workers || {})[a], off = w && !w.ready
+        return h('button', { key: a, className: (f.agent === a ? 'th-on' : '') + (off ? ' th-dim' : ''), title: off ? `${AGENTS[a].name} is ${w.why} on this machine` : '', onClick: () => set({ agent: a, model: '', effort: '' }) }, h(Mini, { agent: a, size: 20 }), AGENTS[a].name.split(' ')[0])
+      })),
       h('div', { className: 'th-mm-sec' }, 'Kind'),
       h('div', { className: 'th-kinds' }, Object.keys(KIND_LABEL).map(k => h('button', { key: k, className: f.kind === k ? 'th-on' : '', onClick: () => set({ kind: k }) }, h(Icon, { name: KIND_ICON[k], size: 13 }), KIND_LABEL[k]))),
       h('div', { className: 'th-addrow' },
@@ -1712,6 +2076,15 @@ height:100%;display:flex;flex-direction:column;color:var(--th-text);font-size:13
 .th-ver-latest .th-mono{color:var(--th-text);font-weight:600}.th-cur{margin-left:6px;font-size:10.5px;font-weight:600;color:var(--th-ok);background:color-mix(in srgb,var(--th-ok) 14%,transparent);border-radius:6px;padding:0 6px}
 .th-stale{margin-left:auto;flex-shrink:0;display:inline-flex;align-items:center;gap:3px;font-size:10.5px;font-weight:600;color:var(--th-warn);background:color-mix(in srgb,var(--th-warn) 15%,transparent);border-radius:6px;padding:1px 6px}
 .th-cmd{display:flex;flex-direction:column;gap:8px}
+.th-reply{display:flex;flex-direction:column;gap:6px;padding:10px 12px;border-radius:14px;background:var(--th-panel);border:1px solid var(--th-line);box-shadow:var(--th-shadow)}
+.th-reply-q{display:flex;justify-content:flex-end}.th-reply-q span{max-width:80%;padding:5px 10px;border-radius:12px;background:var(--th-sunken);font-size:12.5px;color:var(--th-t2);white-space:pre-wrap;overflow:hidden;text-overflow:ellipsis;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
+.th-reply-a{display:flex;gap:9px;align-items:flex-start}.th-reply-text{flex:1;min-width:0;max-height:170px;overflow:auto;font-size:13px;line-height:1.5;color:var(--th-text);white-space:pre-wrap;overflow-wrap:anywhere}
+.th-reply-live .th-reply-text.th-muted{animation:th-breathe 1.6s ease-in-out infinite}
+.th-reply-ft{display:flex;justify-content:flex-end;gap:14px}.th-root .th-linkbtn{font-size:12px;color:var(--th-t3);background:none!important;border:0!important;padding:0;cursor:pointer}.th-root .th-linkbtn:hover{color:var(--th-text)}
+@keyframes th-breathe{0%,100%{opacity:.55}50%{opacity:1}}
+.th-root .th-trow.th-off .th-mini{opacity:.4;filter:grayscale(1)}.th-root .th-trow.th-off .th-twhat{color:var(--th-warn)}
+.th-root .th-agentpick button.th-dim{opacity:.5}
+.th-root .th-fold:not(.th-on){color:var(--th-text)}.th-root .th-fold:not(.th-on) svg{color:currentColor}
 .th-cmd-box{display:flex;align-items:center;gap:10px;padding:7px 7px 7px 10px;border-radius:16px;background:var(--th-panel);border:1px solid var(--th-line);box-shadow:var(--th-shadow);transition:border-color .2s,box-shadow .2s}
 .th-cmd-box:focus-within{border-color:var(--th-select);box-shadow:0 0 0 4px color-mix(in srgb,var(--th-select) 14%,transparent),var(--th-shadow)}
 .th-cmd-input{flex:1;min-width:0;border:0;outline:none;background:transparent;font:inherit;font-size:13.5px;color:var(--th-text)}
@@ -1747,6 +2120,63 @@ height:100%;display:flex;flex-direction:column;color:var(--th-text);font-size:13
 .th-modelbtn span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.th-modelbtn svg:first-child{color:var(--th-hermes)}.th-modelbtn:hover{border-color:var(--th-select)!important}
 .th-modelbtn.th-compact{height:24px;padding:0 6px;font-size:11px;max-width:120px}
 .th-webbtn svg:first-child{color:var(--th-t2)}
+.th-root.th-side{background:var(--th-bg);min-width:0;container:thside/inline-size}
+.th-sidehead{display:flex;align-items:center;gap:10px;padding:10px 14px;font-size:12.5px;flex-shrink:0;flex-wrap:wrap}
+.th-sidehead .th-sidename{font-size:14px;font-weight:650}
+.th-sidebody{flex:1;min-height:0;display:flex;flex-direction:column;gap:10px;padding:0 12px 12px;overflow-y:auto;overflow-x:hidden}
+.th-side .th-sidews{position:relative;flex:1 0 360px;min-height:360px;display:grid;grid-template-columns:minmax(0,1fr);grid-template-rows:minmax(0,1fr)}
+.th-side .th-sidews .th-surface{grid-area:1/1;height:100%;min-height:360px;border-radius:20px}
+/* The usual (narrow) side window: a task card rises from the bottom of the canvas; the canvas stays above it. */
+.th-side .th-sidesheet{position:absolute;left:10px;right:10px;bottom:10px;z-index:12;max-height:calc(100% - 20px);display:flex;flex-direction:column;min-height:0;overflow:hidden;border-radius:22px;background:var(--th-panel);box-shadow:0 18px 44px -14px rgba(23,23,28,.3),0 2px 8px rgba(23,23,28,.06);transform:translateY(calc(100% + 24px));visibility:hidden;interpolate-size:allow-keywords;transition:transform .5s var(--th-spring),height .42s cubic-bezier(.2,.8,.2,1),visibility 0s linear .5s}
+.th-side .th-sidesheet:focus{outline:none}
+.th-side .th-sidews.th-open .th-sidesheet{transform:none;visibility:visible;transition:transform .5s var(--th-spring),height .42s cubic-bezier(.2,.8,.2,1)}
+.th-side .th-sidews.th-full:not(.th-wide) .th-sidesheet{height:calc(100% - 74px)}
+.th-side .th-dock{transition:opacity .25s ease,transform .35s var(--th-spring)}
+.th-side .th-sidews.th-open:not(.th-wide) .th-dock{opacity:0;transform:translateY(14px);pointer-events:none}
+/* A wide side window: the details sit in a column beside the canvas, which stays in view and clickable. */
+.th-side .th-sidews.th-wide.th-open{grid-template-columns:minmax(0,1fr) clamp(320px,38%,400px);column-gap:12px}
+.th-side .th-sidews.th-wide .th-sidesheet{position:relative;left:auto;right:auto;bottom:auto;grid-area:1/2;height:auto;max-height:none;transform:none;box-shadow:var(--th-shadow);animation:th-fade .3s ease}
+.th-side .th-sidews.th-wide:not(.th-open) .th-sidesheet{display:none}
+.th-grab{flex-shrink:0;align-self:center;position:relative;width:52px;height:18px;margin-bottom:-8px;border-radius:999px}
+.th-grab::before{content:"";position:absolute;left:50%;top:7px;width:36px;height:4px;margin-left:-18px;border-radius:999px;background:var(--th-line2);transition:background .2s}
+.th-grab:hover::before{background:var(--th-t4)}
+.th-tpk{padding:8px 16px 14px;display:flex;flex-direction:column;gap:11px;min-height:0;overflow-y:auto;animation:th-fade .3s ease}
+.th-tpk-hd{display:flex;align-items:center;gap:12px;min-width:0}
+.th-tpk-tx{flex:1;min-width:0}
+.th-tpk-ttl{margin-top:1px;font-size:15px;font-weight:650;letter-spacing:-.015em;line-height:1.3;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.th-tpk .th-tpk-x{flex-shrink:0;align-self:flex-start;width:30px;height:30px;border-radius:50%;margin:-2px -6px 0 0}
+.th-tpk-state{display:flex;align-items:center;gap:10px;min-width:0}
+.th-tpk-hint{flex:1;min-width:0;font-size:12px;color:var(--th-t3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.th-tpk-live{flex:1;min-width:0;display:flex;align-items:center;gap:7px;height:30px;padding:0 12px 0 6px;border-radius:999px;background:var(--th-sunken);font-size:12px;color:var(--th-t2)}
+.th-tpk-live b{color:var(--th-text);font-weight:600}.th-tpk-live>span{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.th-tpk-err{display:flex;gap:7px;align-items:flex-start;padding:8px 10px;border-radius:12px;background:color-mix(in srgb,var(--th-bad) 7%,transparent);font-size:12px;line-height:1.45;color:var(--th-t2)}
+.th-tpk-err svg{flex-shrink:0;margin-top:2px;color:var(--th-bad)}.th-tpk-err span{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;overflow-wrap:anywhere}
+.th-tpk-facts{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:7px 8px 7px 12px;border-radius:14px;background:var(--th-sunken);font-size:12px}
+.th-tpk-who{display:inline-flex;align-items:center;gap:5px;margin-right:auto;font-weight:600;color:var(--th-text);white-space:nowrap}
+.th-tpk-sep{margin-right:4px;font-weight:400;color:var(--th-t3)}
+.th-tpk-act{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.th-tpk-more{display:inline-flex;align-items:center;gap:4px;height:30px;padding:0 8px 0 11px;border-radius:999px;font-size:12px;font-weight:600;color:var(--th-t2);transition:background .2s,color .2s}
+.th-tpk-more:hover{background:var(--th-hover);color:var(--th-text)}
+.th-sheettools{position:absolute;top:10px;right:10px;z-index:6;display:flex;gap:2px;padding:2px;border-radius:999px;background:color-mix(in srgb,var(--th-panel) 86%,transparent);backdrop-filter:blur(6px)}
+.th-sheettools .th-ib{width:30px;height:30px;border-radius:50%}
+.th-root.th-side .th-sheetbody{flex:1;min-height:0;border-radius:0;box-shadow:none;background:transparent}
+.th-side .th-sheetbody .th-ihead{padding-right:66px}.th-side .th-wide .th-sheetbody .th-ihead{padding-right:34px}
+/* Very narrow: the view switcher keeps its icons and drops the words. */
+@container thside (max-width:520px){.th-side .th-seglbl{display:none}.th-root.th-side .th-seg button{padding:0 11px}}
+.th-side .th-sideneed{display:flex;align-items:center;gap:8px;padding:6px 8px}.th-side .th-sideneed .th-need{flex:1;min-width:0}.th-sidemore{font-size:11.5px;white-space:nowrap}
+.th-side .th-banner{border-radius:14px}
+.th-sideempty{margin:auto;max-width:300px;display:flex;flex-direction:column;align-items:center;gap:10px;text-align:center;padding:24px;font-size:12.5px;color:var(--th-t3)}
+.th-sideempty b{font-size:14px;color:var(--th-text)}
+.th-seg-plain .th-thumb{display:none}.th-seg-plain button.th-on{background:var(--th-sunken);color:var(--th-text);border-radius:999px}
+.th-activity .th-sidebody{gap:10px}.th-evrow{display:grid;grid-template-columns:18px minmax(0,1fr) auto;gap:8px;align-items:center;font-size:12px;padding:5px 0;color:var(--th-t2)}
+.th-evrow span{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.th-evrow em{font-style:normal;font-size:11px;color:var(--th-t4)}
+.th-activity .th-trow{grid-template-columns:22px 150px minmax(0,1fr);gap:8px}.th-activity .th-trow .th-tn{display:none}
+.th-hermeswork{position:absolute;top:12px;left:14px;z-index:6;display:flex;align-items:center;gap:7px;height:30px;padding:0 12px 0 5px;border-radius:999px;background:var(--th-panel);box-shadow:var(--th-shadow);font-size:12px;font-weight:600;color:var(--th-text);animation:th-pop .35s var(--th-spring)}
+.th-dots{display:inline-flex;gap:3px}.th-dots b{width:4px;height:4px;border-radius:50%;background:var(--th-t3);animation:th-breathe 1.2s ease-in-out infinite}.th-dots b:nth-child(2){animation-delay:.2s}.th-dots b:nth-child(3){animation-delay:.4s}
+@keyframes th-pop{from{opacity:0;transform:translateY(-4px) scale(.96)}to{opacity:1;transform:none}}
+.th-tcard.th-mention{box-shadow:0 0 0 2px var(--th-hermes),var(--th-shadow)!important;animation:th-mention 6s ease forwards}
+.th-node.th-mention .th-nodecard{animation:th-mention 6s ease forwards}
+@keyframes th-mention{0%,80%{box-shadow:0 0 0 2px var(--th-hermes),var(--th-shadow)}100%{box-shadow:var(--th-shadow)}}
 .th-webmenu .th-mm-it span{white-space:normal;line-height:1.4}
 .th-webmark{display:inline-flex;vertical-align:-1px;margin-left:5px;color:var(--th-t3)}
 .th-modelmenu{min-width:260px!important;padding:6px!important;max-height:380px;overflow:auto;z-index:60!important}
@@ -2056,6 +2486,19 @@ textarea.th-cmd-input{resize:none;line-height:1.45;padding:4px 0;max-height:120p
 `
 
 /* ------------------------------------------------------------------ plugin */
+// Beside the chat, Thoth is a work surface like the chat itself (placement 'main'), not side chrome: Hermes's
+// right-sidebar toggle folds its files, review and terminal without taking Thoth along.
+const SIDE_PANE = { placement: 'main', width: 'clamp(420px, 44vw, 980px)' }
+// "Chat + Thoth" in Hermes's layout picker (Layout → Templates): sessions, the chat, Thoth beside it. Picking it
+// leaves Hermes's own tool panes (files, review, terminal) open or closed as they were.
+const THOTH_LAYOUT = {
+  type: 'split', id: 'thoth-layout', orientation: 'row', weights: [1, 2.6, 2.6],
+  children: [
+    { type: 'group', id: 'grp-sessions', panes: ['sessions'], active: 'sessions' },
+    { type: 'group', id: 'grp-main', panes: ['workspace'], active: 'workspace' },
+    { type: 'group', id: 'grp-thoth', panes: ['thoth:canvas', 'thoth:activity'], active: 'thoth:canvas' }
+  ]
+}
 export default {
   id: 'thoth',
   name: 'Thoth',
@@ -2064,10 +2507,16 @@ export default {
     ctx.registerMany([
       { id: 'page', area: ROUTES_AREA, data: { path: '/thoth' }, render: () => h(ThothPage) },
       { id: 'nav', area: SIDEBAR_NAV_AREA, data: { path: '/thoth', label: 'Thoth', codicon: 'organization' } },
-      { id: 'chip', area: STATUSBAR_AREAS.right, order: 125, render: () => h(StatusChip) }
+      { id: 'chip', area: STATUSBAR_AREAS.right, order: 125, render: () => h(StatusChip) },
+      // The whole canvas docked to the right of the conversation (drag the divider to resize), and a compact
+      // activity tab with it. Two panes, so closing one only hides it instead of disabling Thoth.
+      { id: 'canvas', area: 'panes', title: 'Thoth', data: { ...SIDE_PANE, dock: { pane: 'workspace', pos: 'right' } }, render: () => h(ThothSide) },
+      { id: 'activity', area: 'panes', title: 'Thoth activity', data: { ...SIDE_PANE, dock: { pane: 'thoth:canvas', pos: 'center' } }, render: () => h(ThothActivity) },
+      { id: 'layout', area: 'layouts', title: 'Chat + Thoth', order: 50, data: THOTH_LAYOUT }
     ])
+    followHermes()
     ctx.onEvent('plugin.thoth.changed', refreshSoon)
     ctx.setInterval(() => { if (store.listeners.size) refresh() }, 3000)
-    ctx.onDispose(() => { store.listeners.clear(); ctxRef = null })
+    ctx.onDispose(() => { store.listeners.clear(); [...chatOffs, ...hermesOffs].forEach(off => { try { off() } catch (e) {} }); chatOffs = []; hermesOffs = []; ctxRef = null })
   }
 }

@@ -11,6 +11,7 @@ import os
 import re
 import subprocess
 import sys
+import threading
 import time
 import urllib.parse
 from collections.abc import Callable
@@ -203,7 +204,14 @@ class Thoth:
                     browser=browser,
                 )
             )
-        return {"created": [self._task_brief(t) for t in created], "board": board_lines(brain)}
+        result = {"created": [self._task_brief(t) for t in created], "board": board_lines(brain)}
+        if any(t["agent"] in CLI_WORKERS for t in created):
+            ready = self.workers()
+            missing = [f"{t['ref']} is for {_name(t['agent'])}, which is {ready[t['agent']]['why']} on this machine: give it to another agent"
+                       for t in created if t["agent"] in CLI_WORKERS and not ready.get(t["agent"], {}).get("ready")]
+            if missing:
+                result["warnings"] = missing
+        return result
 
     def update_task(self, project_dir: str, task: Any, *, title: str = "", detail: str = "", agent: str = "", status: str = "", kind: str = "", role: str = "", model: str | None = None, effort: str | None = None,
                     browser: str | None = None) -> dict:
@@ -323,7 +331,7 @@ class Thoth:
             raise BrainError(f"{current['ref']} is {current['status']}; review needs a finished build")
         if not current["worktree"] or not Path(current["worktree"]).exists():
             raise BrainError(f"{current['ref']} has no worktree to review")
-        reviewer = (reviewer or _other(current["agent"] or "claude")).strip().lower()
+        reviewer = (reviewer or self.default_reviewer(current["agent"])).strip().lower()
         if reviewer not in CLI_WORKERS:
             raise BrainError(f"reviewer must be one of {', '.join(CLI_WORKERS)}")
         driver = self._driver(reviewer)
@@ -349,7 +357,55 @@ class Thoth:
         ok, detail = driver.available()
         if not ok:
             raise BrainError(detail)
+        if self.workers().get(agent, {}).get("why") == "not signed in":
+            state = self.workers(fresh=True).get(agent, {})  # the user may have just signed in
+            if state.get("why") == "not signed in":
+                raise BrainError(f"{driver.label} isn't signed in on this machine: {state['hint']}, then try again. "
+                                 "Or give this task to another agent.")
         return driver
+
+    _workers_cache: dict[tuple, tuple[float, dict]] = {}
+    _workers_refreshing: set = set()
+
+    def workers(self, fresh: bool = False) -> dict[str, dict[str, Any]]:
+        """Which agent CLIs this machine can run right now: installed, and signed in as far as the CLI itself says.
+        A stale answer (over a minute old) is returned at once and refreshed in the background, so the page never waits."""
+        key = tuple(str(self.settings.get(f"{a}_path") or "") for a in CLI_WORKERS)
+        hit = Thoth._workers_cache.get(key)
+        if hit is not None and not fresh:
+            if time.time() - hit[0] >= 60 and key not in Thoth._workers_refreshing:
+                Thoth._workers_refreshing.add(key)
+                threading.Thread(target=self._check_workers, args=(key,), name="thoth-workers", daemon=True).start()
+            return hit[1]
+        return self._check_workers(key)
+
+    def _check_workers(self, key: tuple) -> dict[str, dict[str, Any]]:
+        try:
+            out: dict[str, dict[str, Any]] = {}
+            for agent in CLI_WORKERS:
+                drv = driver_for(agent, self.settings)
+                installed, detail = drv.available()
+                entry: dict[str, Any] = {"ready": installed, "why": "" if installed else "not installed", "hint": "" if installed else detail}
+                if installed:
+                    signed, hint = drv.signed_in()
+                    entry["signed_in"] = signed
+                    if signed is False:
+                        entry.update(ready=False, why="not signed in", hint=hint)
+                out[agent] = entry
+            Thoth._workers_cache[key] = (time.time(), out)
+            return out
+        finally:
+            Thoth._workers_refreshing.discard(key)
+
+    def default_reviewer(self, author: str) -> str:
+        """The other agent reviews; when it can't run here, the same kind of agent reviews in a fresh session."""
+        ready = self.workers()
+        other = _other(author or "claude")
+        if ready.get(other, {}).get("ready"):
+            return other
+        if author in CLI_WORKERS and ready.get(author, {}).get("ready"):
+            return author
+        return other
 
     def _check_capacity(self, brain: Brain) -> None:
         limit = int(self.settings.get("max_concurrent_runs") or 3)
@@ -1060,6 +1116,7 @@ class Thoth:
             "events": brain.events(limit=80),
             "needs": self.needs(project_dir),
             "agents": self.presence(brain),
+            "workers": self.workers(),
             "usage": self.usage(brain),
             "now": time.time(),
         }

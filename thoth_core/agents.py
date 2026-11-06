@@ -162,8 +162,23 @@ class Driver:
     def available(self) -> tuple[bool, str]:
         path = self.resolve()
         if not path:
-            return False, f"{self.label} CLI ('{self.binary}') was not found on PATH; install it or set {self.name}_path"
+            return False, (f"{self.label} isn't installed on this machine (no '{self.binary}' on PATH). Install it and sign in, "
+                           f"set {self.name}_path, or give this task to another agent.")
         return True, path
+
+    def signed_in(self) -> tuple[bool | None, str]:
+        """Ask the CLI itself whether it is signed in; Thoth never reads its credentials. None means unknown."""
+        return None, ""
+
+    def _ask(self, *args: str) -> tuple[int, str] | None:
+        import subprocess
+
+        try:
+            proc = subprocess.run([self.resolve() or self.binary, *args], capture_output=True, text=True, timeout=15,
+                                  stdin=subprocess.DEVNULL, env=clean_env(self.settings.get("env_passthrough") or ()))
+            return proc.returncode, (proc.stdout or "") + (proc.stderr or "")
+        except Exception:
+            return None
 
     def command(self, *, kind: str, session_id: str, mcp: McpSpec | None, model: str = "", effort: str = "", name: str = "",
                 browser: McpSpec | None = None) -> list[str]:
@@ -193,6 +208,18 @@ class ClaudeDriver(Driver):
             {"id": "sonnet", "label": "Sonnet 5.5", "note": "Fast and capable"},
             {"id": "haiku", "label": "Haiku 5.5", "note": "Quick, light tasks"},
         ]
+
+    def signed_in(self) -> tuple[bool | None, str]:
+        out = self._ask("auth", "status")  # prints {"loggedIn": true, ...}
+        if out is None:
+            return None, ""
+        try:
+            state = json.loads(out[1]).get("loggedIn")
+        except (ValueError, AttributeError):
+            return None, ""
+        if state is False:
+            return False, "run `claude` once and sign in"
+        return (True, "") if state is True else (None, "")
 
     READ_ONLY_TOOLS = ["Read", "Glob", "Grep", "Bash(git diff:*)", "Bash(git log:*)", "Bash(git show:*)", "Bash(git status:*)"]
     EDIT_TOOLS = ["Edit", "Write", "MultiEdit", "NotebookEdit"]
@@ -322,6 +349,15 @@ class CodexDriver(Driver):
     label = "Codex"
     EFFORTS = ("low", "medium", "high", "xhigh", "max", "ultra")
     _catalog: list[dict[str, Any]] | None = None
+
+    def signed_in(self) -> tuple[bool | None, str]:
+        out = self._ask("login", "status")  # "Logged in using ChatGPT" / "Not logged in"
+        if out is None:
+            return None, ""
+        code, text = out
+        if "not logged in" in text.lower() or (code != 0 and "logged in" not in text.lower()):
+            return False, "run `codex login`"
+        return (True, "") if "logged in" in text.lower() else (None, "")
 
     def models(self) -> list[dict[str, Any]]:
         """Models this Codex login can use (`codex debug models`), cached per process."""
