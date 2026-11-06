@@ -1,16 +1,25 @@
-# Thoth — one brain for Claude Code, Codex and Hermes
+# Thoth — agents working as one team, each with its own harness
 
-![Thoth: one brain for Claude Code, Codex and Hermes](docs/banner.png)
+![Thoth: agents working as one team, each with its own harness](docs/banner.png)
 
-You use Claude Code, Codex and Hermes. Each is good at different things, but they
-don't know about each other: no shared context, no shared progress, and they
-overwrite each other's files when they work on the same project.
+You use Claude Code, Codex and Hermes. Each is good at different things, but on their own they work
+alone: you carry context from one to the other by hand, and they overwrite each other's files when
+they share a project.
 
-**Thoth** turns them into one team. Hermes coordinates: it plans the work onto a
-shared board, starts the **real** Claude Code and Codex CLIs on tasks in parallel,
-has each one review the other's work, and merges the result. Everything the team
-knows lives in one shared brain in your project, and the coordinator role can move
-to Claude Code or Codex at any time.
+**Thoth makes them one team, and each agent keeps its own harness.** Hermes plans the work onto a
+shared board and gives each task to the agent that suits it. The **real** Claude Code and Codex build
+side by side, each in its own git worktree, on your own logins and plans. Each reviews the other's
+work, and Hermes merges what passes. What one agent decides or makes goes into the next one's brief,
+so nobody copy-pastes.
+
+**Why their own harness.** Anthropic, OpenAI and Nous keep making Claude Code, Codex and Hermes
+better: new tools, sandboxes, sub-agents and models. Thoth doesn't swap them for one generic wrapper,
+so each improvement reaches your team the day it ships. Nothing is locked in either: connect Claude
+Code or Codex to the same board (one click on the Thoth page), keep working in it directly, and it
+picks up where the team is. It can even take over as coordinator.
+
+Today the team is Claude Code, Codex and Hermes. Next we want to bring more agents that ship their own
+harness onto the same board, such as Grok Bot, Muse, Antigravity and DeepSeek Harness.
 
 ![The Thoth page in Hermes Desktop: overview, live canvas, task inspector and the command bar](docs/screenshots/overview.png)
 
@@ -37,7 +46,8 @@ to Claude Code or Codex at any time.
 | Agents overwrite each other | Each task gets its **own git branch and worktree**, so Claude Code and Codex can work at the same time. |
 | No versions | Every run's result is a **commit** on its task branch; merges are `--no-ff` merge commits; the timeline records which agent made which commit. |
 | One agent checks its own work | **Cross-review**: the other agent reviews the diff read-only and returns approve/changes with comments. Re-assigning a task resumes the original agent's session with the review comments in its brief. |
-| Stuck with one coordinator | `thoth_coordinator` hands the coordinator role to Claude Code or Codex; they drive the same brain through the Thoth MCP server. |
+| Stuck with one coordinator | `thoth_coordinator` hands the coordinator role to Claude Code or Codex; they drive the same board through the Thoth MCP server. |
+| Agents can't look at the web | A task can get a **browser**: a clean Chrome without your logins, or your own Chrome when it needs your logins. See [Looking at the web](#looking-at-the-web). |
 
 ## Not only code
 
@@ -52,6 +62,24 @@ Not happy with a result? **Send it back** with your words: the same agent contin
 restored.
 
 ![A Codex sprite task: send-back box with model choice, and two versions with their images](docs/screenshots/revise-versions.png)
+
+## Looking at the web
+
+The agents' shells have no network. A task that has to look at websites gets a browser instead, through
+Google's Chrome DevTools MCP server. Say Codex should study a client's current site before Claude designs
+their sales page:
+
+- **Clean Chrome** (`browser: clean`): a fresh headless Chrome without your logins, deleted after the run.
+  Right for public sites.
+- **Your Chrome** (`browser: user`): your everyday Chrome with your logins, for pages behind them (your
+  store's admin, a private dashboard). Turn on remote debugging once at `chrome://inspect/#remote-debugging`
+  (Chrome 144 or newer); Chrome then asks you to allow each run's connection. The agent opens its own
+  tab, is told to only look (no posting, buying or changing settings) and closes the tab when it is done.
+  It can see the titles of your other tabs, and the approval card says so.
+
+Hermes chooses when it plans, or set it in the task inspector on the Thoth page. Reviews never browse. In
+our runs Claude Code studied nousresearch.com in a clean Chrome in 41 s, and Codex did the same in the
+user's Chrome in about a minute; both returned a screenshot and the site's real colors and fonts.
 
 ## One CRM, built two ways
 
@@ -109,13 +137,14 @@ across your Claude and ChatGPT plans.
 - Hermes Agent ≥ 0.22.5
 - `git`
 - [Claude Code](https://docs.claude.com/en/docs/claude-code) (`claude`) and/or [Codex CLI](https://github.com/openai/codex) (`codex`), installed and **logged in**. Thoth uses your existing logins and plans; it never handles their credentials.
+- Only for tasks that browse: Node.js 20.19 or newer (`npx`; Hermes's own Node works) and Google Chrome.
 
 ## Install
 
 ```bash
 hermes plugins install thoth                 # from the plugin catalog
 hermes plugins install cayden970207/thoth    # or straight from GitHub
-hermes thoth doctor                          # checks claude, codex and git
+hermes thoth doctor                          # checks claude, codex, git and the browser
 ```
 
 Then open the **Thoth** page in Hermes Desktop's sidebar.
@@ -133,7 +162,7 @@ Hermes will call the Thoth tools; you approve each agent launch and each merge.
 | Tool | What it does |
 |---|---|
 | `thoth_init` | Create/reopen the brain (`.thoth/`, kept out of git) |
-| `thoth_plan` | Add tasks with agent and dependencies |
+| `thoth_plan` | Add tasks with agent, dependencies and, when they need the web, a browser |
 | `thoth_assign` | Start Claude Code or Codex on a task in the background (**needs your approval**) |
 | `thoth_wait` | Wait for runs and get summary, commit and diffstat |
 | `thoth_review` | Cross-review by the other agent, read-only (**needs your approval**) |
@@ -148,9 +177,8 @@ For a brand-new project, ask for one: Hermes calls `thoth_init(create=true)` and
 and its git repository. A task that depends on several unfinished tasks starts with all of their work
 merged into its branch.
 
-**Seeing the result.** Agents cannot open a browser inside their sandbox, so every task that made a web
-page or a browser game gets an **Open preview** button on the Thoth page (and Hermes has
-`thoth_preview`). Thoth serves that task's folder on `127.0.0.1`, read-only, never hidden files such
+**Seeing the result.** Every task that made a web page or a browser game gets an **Open preview** button
+on the Thoth page (and Hermes has `thoth_preview`). Thoth serves that task's folder on `127.0.0.1`, read-only, never hidden files such
 as `.env`. The **Outputs** view collects everything the team made that you can look at — images, video, sound,
 web pages and documents — and plays or shows each one in place. On the canvas, shipped work folds into
 the Main card once there is more than a little of it (the count in its corner lays it out again), so a long
@@ -259,7 +287,17 @@ environment passthrough.
   only) or `codex mcp add thoth …` (Codex's own config, all projects), so that tool can coordinate through
   the bundled MCP server. Thoth changes no other setting of Claude Code or Codex, and reads neither one's
   login: they sign in on their own.
-- No network calls of its own, no telemetry, no credential reads, no self-updating code.
+- **Web browsing, only for tasks you give a browser**: the agent's CLI starts `npx -y chrome-devtools-mcp@1.2.0`
+  (Google's Chrome DevTools MCP server, downloaded from npm on first use and pinned to that exact version,
+  which has no dependencies of its own) with `--no-usage-statistics --no-performance-crux --redactNetworkHeaders`.
+  A clean browser is a headless Chrome with a temporary profile, deleted after the run. "Your Chrome"
+  (`--autoConnect`) attaches to the Chrome you are running, only while remote debugging is on and only after
+  you allow the connection in Chrome; the agent then sees your open tabs' titles and addresses, acts with
+  your logins, and is told to only look in a tab of its own. The browser tools are pre-approved inside that
+  run (`codex exec` cannot ask), which the run's approval card covers; an "always allow" for runs without a
+  browser never covers runs with one. Reviews never get a browser.
+- No network calls of its own (the browser package above is fetched by npx when a task first browses), no
+  telemetry, no credential reads, no self-updating code.
 
 ## Development
 

@@ -14,6 +14,8 @@ _KIND = {"type": "string", "enum": ["code", "asset", "doc", "research", "design"
 _ROLE = {"type": "string", "description": "e.g. Game developer, Art pipeline"}
 _MODEL = {"type": "string", "description": "fable|opus|sonnet|haiku, or a Codex slug (thoth_models)"}
 _EFFORT = {"type": "string", "enum": ["low", "medium", "high", "xhigh", "max", "ultra"]}
+_BROWSER = {"type": "string", "enum": ["off", "clean", "user"],
+            "description": "Web browser for the agent: clean = a fresh Chrome without logins; user = the user's own Chrome and logins, only when the task needs them"}
 
 
 def _obj(props: dict, required: list[str] | None = None) -> dict:
@@ -44,7 +46,7 @@ TOOLS: dict[str, tuple[str, dict]] = {
             "tasks": {"type": "array", "items": {"type": "object", "properties": {
                 "title": {"type": "string", "description": "Short imperative"},
                 "detail": {"type": "string", "description": "Instructions and acceptance criteria"},
-                "agent": _WORKER, "kind": _KIND, "role": _ROLE, "model": _MODEL, "effort": _EFFORT,
+                "agent": _WORKER, "kind": _KIND, "role": _ROLE, "model": _MODEL, "effort": _EFFORT, "browser": _BROWSER,
                 "depends_on": {"type": "array", "items": {"type": ["string", "integer"]}, "description": "Task ids (\"T2\") or 1-based positions in this list"},
             }, "required": ["title"]}},
         }, ["tasks"]),
@@ -53,7 +55,7 @@ TOOLS: dict[str, tuple[str, dict]] = {
         "Start an agent on a task in the background, in the task's own worktree, with a brief from the brain. "
         "Its work is committed when it ends; re-assigning resumes its session. Returns at once: then call thoth_wait.",
         _obj({"task": _TASK, "agent": _WORKER, "instructions": {"type": "string", "description": "Extra instructions for this run"},
-              "model": _MODEL, "effort": _EFFORT}, ["task"]),
+              "model": _MODEL, "effort": _EFFORT, "browser": _BROWSER}, ["task"]),
     ),
     "thoth_review": (
         "Read-only cross-review of a built task by another agent (default: the other one). Verdict and comments go on the task.",
@@ -83,7 +85,8 @@ TOOLS: dict[str, tuple[str, dict]] = {
     "thoth_update_task": (
         "Edit a task, reopen it (status todo) or cancel it.",
         _obj({"task": _TASK, "title": {"type": "string"}, "detail": {"type": "string"}, "agent": _WORKER, "kind": _KIND,
-              "role": _ROLE, "model": _MODEL, "effort": _EFFORT, "status": {"type": "string", "enum": ["todo", "cancelled"]}}, ["task"]),
+              "role": _ROLE, "model": _MODEL, "effort": _EFFORT, "browser": _BROWSER,
+              "status": {"type": "string", "enum": ["todo", "cancelled"]}}, ["task"]),
     ),
     "thoth_complete": (
         "Finish a task you did yourself (assigned to hermes): commits it and records your summary, outputs and decisions.",

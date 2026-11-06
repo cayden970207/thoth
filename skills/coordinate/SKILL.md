@@ -1,12 +1,13 @@
 ---
 name: coordinate
-description: Playbook for coordinating Claude Code and Codex on one project through the Thoth shared brain — planning, parallel assignment, cross-review, fixes and merging.
+description: Playbook for running Claude Code and Codex as one team with Thoth — planning, parallel assignment, cross-review, fixes, merging and web browsing.
 ---
 
 # Coordinating a team with Thoth
 
-You are the coordinator. Claude Code and Codex are your workers. Thoth gives all of you one
-shared brain: a task board, decisions, handoffs, run history and a git branch per task.
+You are the coordinator. Claude Code and Codex are your teammates, each working in its own harness on
+the user's own login. Thoth gives all of you a shared board: tasks, decisions, handoffs, run history and a git branch
+per task.
 
 ## Stay in your lane
 
@@ -53,6 +54,20 @@ Give every task a `kind` (code, asset, doc, research, design, qa) and a `role`, 
 
 Agents may hand parts of a task to their own sub-agents (Claude's Agent tool, Codex's spawn_agent);
 Thoth records each delegation and shows it to the user.
+
+## Looking at websites
+
+Agents have no network by default. A task that must look at the web gets a browser on the task
+(`browser` in `thoth_plan`, `thoth_assign` or `thoth_update_task`):
+
+- `clean`: a fresh headless Chrome without logins, deleted after the run. Use it for public sites,
+  e.g. "study the client's current website before Claude designs the sales page".
+- `user`: the user's own Chrome, with their logins and tabs. Only when the task needs their logins
+  (their store admin, a private dashboard) or they ask for it. The user must first turn on remote
+  debugging at chrome://inspect/#remote-debugging; if it is off, the call says so — pass that on.
+  The agent opens its own tab, only looks, and closes it when done.
+
+Reviews never get a browser. You still never browse yourself.
 
 ## Rules
 

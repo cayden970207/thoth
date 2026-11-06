@@ -13,6 +13,7 @@ import re
 import time
 from typing import TYPE_CHECKING, Any
 
+from . import browser as web
 from .brain import rid, tid
 
 if TYPE_CHECKING:
@@ -130,7 +131,8 @@ def _dep_files(brain: "Brain", dep_id: int) -> list[str]:
     return (outputs or changed)[:25]
 
 
-def build_brief(brain: "Brain", task: dict, *, agent: str, instructions: str = "", has_mcp: bool = False, resumed: bool = False, self_run: bool = False) -> str:
+def build_brief(brain: "Brain", task: dict, *, agent: str, instructions: str = "", has_mcp: bool = False, resumed: bool = False, self_run: bool = False,
+                browser: str = "") -> str:
     meta = brain.meta()
     coordinator = meta.get("coordinator", "hermes")
     parts: list[str] = []
@@ -185,6 +187,8 @@ def build_brief(brain: "Brain", task: dict, *, agent: str, instructions: str = "
     if dep_lines:
         parts.append("## What your dependencies produced\n" + "\n".join(dep_lines))
     parts.append(_tools_section(has_mcp))
+    if not self_run:
+        parts.append(web.brief(browser))  # also on a resumed run: the browser may be new, and its rules stay in view
     if self_run:
         parts.append(
             "## How to finish\nYou are doing this task yourself, not through a CLI agent. Work inside the worktree path above, "

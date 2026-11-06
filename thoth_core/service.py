@@ -17,6 +17,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from . import browser as web
 from . import gitops, preview
 from .agents import McpSpec, RunState, clean_env, driver_for
 from .brain import NOTE_KINDS, TASK_KINDS, OPEN_RUN_STATUSES, Brain, BrainError, find_brain_root, parse_id, rid, tid
@@ -184,6 +185,10 @@ class Thoth:
             kind = str(spec.get("kind") or "code").strip().lower()
             if kind not in TASK_KINDS:
                 raise BrainError(f"Task #{index}: kind must be one of {', '.join(TASK_KINDS)}")
+            try:
+                browser = web.normalize(spec.get("browser"))
+            except BrainError as exc:
+                raise BrainError(f"Task #{index}: {exc}") from None
             created.append(
                 brain.add_task(
                     title=str(spec["title"]).strip(),
@@ -195,11 +200,13 @@ class Thoth:
                     role=str(spec.get("role") or "").strip()[:60],
                     model=str(spec.get("model") or "").strip()[:60],
                     effort=str(spec.get("effort") or "").strip().lower()[:10],
+                    browser=browser,
                 )
             )
         return {"created": [self._task_brief(t) for t in created], "board": board_lines(brain)}
 
-    def update_task(self, project_dir: str, task: Any, *, title: str = "", detail: str = "", agent: str = "", status: str = "", kind: str = "", role: str = "", model: str | None = None, effort: str | None = None) -> dict:
+    def update_task(self, project_dir: str, task: Any, *, title: str = "", detail: str = "", agent: str = "", status: str = "", kind: str = "", role: str = "", model: str | None = None, effort: str | None = None,
+                    browser: str | None = None) -> dict:
         brain = self.open(project_dir)
         task_id = parse_id(task, "T")
         current = brain.task(task_id)
@@ -222,6 +229,8 @@ class Thoth:
             fields["model"] = model.strip()[:60]  # "" = back to the default
         if effort is not None:
             fields["effort"] = effort.strip().lower()[:10]
+        if browser is not None:
+            fields["browser"] = web.normalize(browser)  # applies from the next run
         if status:
             if status not in ("todo", "cancelled"):
                 raise BrainError("Only 'todo' (reopen) or 'cancelled' can be set by hand")
@@ -234,7 +243,8 @@ class Thoth:
 
     # -- runs --------------------------------------------------------------------
 
-    def assign(self, project_dir: str, task: Any, agent: str = "", instructions: str = "", model: str = "", effort: str = "") -> dict:
+    def assign(self, project_dir: str, task: Any, agent: str = "", instructions: str = "", model: str = "", effort: str = "",
+               browser: str | None = None) -> dict:
         brain = self.open(project_dir)
         task_id = parse_id(task, "T")
         current = brain.task(task_id)
@@ -245,9 +255,15 @@ class Thoth:
             raise BrainError(f"{current['ref']} is already {current['status']}")
         if current["status"] == "merged":
             raise BrainError(f"{current['ref']} is already merged; add a new task for follow-up work")
+        if browser is not None and web.normalize(browser) != current.get("browser", ""):
+            current = brain.update_task(task_id, browser=web.normalize(browser))  # kept for later runs and revisions
         if agent == "hermes":
             return self._assign_to_coordinator(brain, current, instructions)
         driver = self._driver(agent)
+        browse = current.get("browser") or ""
+        ok, why = web.ready(browse)
+        if not ok:
+            raise BrainError(why)
         self._check_capacity(brain)
         current = self._prepare_worktree(brain, current)
         session = brain.last_session(task_id, agent) if self.settings.get("resume_sessions") else ""
@@ -259,16 +275,18 @@ class Thoth:
             if last is not None and limit and self._usage(last)["prompt"] > limit:
                 session = ""
         has_mcp = bool(self.settings.get("attach_mcp")) and self.mcp_launcher is not None
-        prompt = build_brief(brain, current, agent=agent, instructions=instructions, has_mcp=has_mcp, resumed=bool(session))
+        prompt = build_brief(brain, current, agent=agent, instructions=instructions, has_mcp=has_mcp, resumed=bool(session), browser=browse)
         run = brain.add_run(task_id=task_id, agent=agent, kind="build", prompt=prompt, actor=self.actor)
         use_model = model or (current["model"] if agent == (current["agent"] or agent) else "")
         use_effort = effort or (current["effort"] if agent == (current["agent"] or agent) else "")
         brain.update_run(run["id"], model=use_model or self.settings.get(f"{agent}_model") or "", effort=use_effort)
         brain.update_task(task_id, status="running", agent=agent)
-        brain.event(self.actor, "run_started", f"{agent} builds {current['ref']} {current['title']}" + (" (resumed session)" if session else ""), task_id=task_id, run_id=run["id"])
-        self._launch(brain, run["id"], current, driver, kind="build", prompt=prompt, session=session, cwd=Path(current["worktree"]), model=use_model, effort=use_effort)
+        brain.event(self.actor, "run_started", f"{agent} builds {current['ref']} {current['title']}" + (" (resumed session)" if session else "")
+                    + {"clean": " with a clean Chrome", "user": " with your Chrome"}.get(browse, ""), task_id=task_id, run_id=run["id"])
+        self._launch(brain, run["id"], current, driver, kind="build", prompt=prompt, session=session, cwd=Path(current["worktree"]), model=use_model, effort=use_effort,
+                     browser=browse)
         return {"run": run["ref"], "task": current["ref"], "agent": agent, "branch": current["branch"], "resumed_session": bool(session), "status": "running",
-                "model": use_model or "default", "effort": use_effort or "default"}
+                "model": use_model or "default", "effort": use_effort or "default", "browser": browse or "off"}
 
     def _assign_to_coordinator(self, brain: Brain, task: dict, instructions: str) -> dict:
         """Hermes (or whoever coordinates) does this task itself, in the task worktree, then calls complete()."""
@@ -402,7 +420,8 @@ class Thoth:
                 notes.append(f"Linked from the main checkout (read-only for you, no network to reinstall): {', '.join(linked)}.")
         return notes
 
-    def _launch(self, brain: Brain, run_id: int, task: dict, driver, *, kind: str, prompt: str, session: str, cwd: Path, model: str = "", effort: str = "") -> None:
+    def _launch(self, brain: Brain, run_id: int, task: dict, driver, *, kind: str, prompt: str, session: str, cwd: Path, model: str = "", effort: str = "",
+                browser: str = "") -> None:
         mcp = None
         if self.settings.get("attach_mcp") and self.mcp_launcher is not None:
             try:
@@ -410,7 +429,11 @@ class Thoth:
             except Exception:
                 logger.warning("thoth: could not prepare the MCP server for R%s", run_id, exc_info=True)
         title = f"Thoth · {task['ref']} {'review' if kind == 'review' else task['title']}"
-        cmd = driver.command(kind=kind, session_id=session, mcp=mcp, model=model, effort=effort, name=title)
+        tools = web.spec(browser) if browser and kind == "build" else None
+        cmd = driver.command(kind=kind, session_id=session, mcp=mcp, model=model, effort=effort, name=title, browser=tools)
+        env = clean_env(self.settings.get("env_passthrough") or [])
+        if tools is not None:
+            env = web.with_node(env)
         log_path = brain.runs_dir / f"R{run_id}.jsonl"
         brain.update_run(run_id, log_path=str(log_path), commit_before=gitops.head(cwd))
 
@@ -432,7 +455,7 @@ class Thoth:
                 cmd=cmd,
                 prompt=prompt,
                 cwd=cwd,
-                env=clean_env(self.settings.get("env_passthrough") or []),
+                env=env,
                 log_path=log_path,
                 timeout=int(self.settings.get("run_timeout_seconds") or 1800),
                 on_progress=on_progress,
@@ -1051,6 +1074,7 @@ class Thoth:
             "depends_on": [tid(d) for d in task["depends_on"]],
             "branch": task["branch"],
             "commit": task["head_commit"][:7] if task["head_commit"] else "",
+            **({"browser": task["browser"]} if task.get("browser") else {}),
         }
 
     @staticmethod

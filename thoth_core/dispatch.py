@@ -49,7 +49,8 @@ def call(svc: Thoth, name: str, args: dict[str, Any], default_project: Callable[
         return svc.plan(project, args.get("tasks") or [], goal=str(args.get("goal") or ""))
     if name == "thoth_assign":
         return svc.assign(project, args.get("task"), agent=str(args.get("agent") or ""), instructions=str(args.get("instructions") or ""),
-                          model=str(args.get("model") or ""), effort=str(args.get("effort") or ""))
+                          model=str(args.get("model") or ""), effort=str(args.get("effort") or ""),
+                          browser=None if args.get("browser") is None else str(args.get("browser")))
     if name == "thoth_review":
         return svc.review(project, args.get("task"), reviewer=str(args.get("reviewer") or ""), instructions=str(args.get("instructions") or ""),
                           model=str(args.get("model") or ""), effort=str(args.get("effort") or ""))
@@ -77,6 +78,7 @@ def call(svc: Thoth, name: str, args: dict[str, Any], default_project: Callable[
             role=str(args.get("role") or ""),
             model=args.get("model") if args.get("model") is not None else None,
             effort=args.get("effort") if args.get("effort") is not None else None,
+            browser=None if args.get("browser") is None else str(args.get("browser")),
         )
     if name == "thoth_revise":
         return svc.revise(project, args.get("task"), str(args.get("feedback") or ""), agent=str(args.get("agent") or ""), files=args.get("files") or [],

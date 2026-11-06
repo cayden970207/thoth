@@ -1,20 +1,21 @@
 name: thoth
-version: 0.4.0
+version: 0.5.0
 manifest_version: 2
 api_version: 1
 description: >-
-  One shared brain for Claude Code, Codex and Hermes. Hermes coordinates: it plans
-  tasks onto a shared board, starts the real Claude Code and Codex CLIs on them, each
-  in its own git worktree, has them cross-review each other and merges the results.
-  Goal, decisions, handoffs, progress and every version live in the project's
-  .thoth/ folder, so any of the three tools can pick up where another left off, and
-  the coordinator role can move to Claude Code or Codex through the bundled MCP server.
+  Agents working as one team, each with its own harness: Claude Code, Codex and Hermes
+  today. Hermes plans tasks on a shared board and hands them to the real Claude Code and
+  Codex CLIs, on your own logins and plans, each in its own git worktree, so every
+  improvement their makers ship reaches your team. They review each other's work and
+  Hermes merges what passes; what one agent decides or makes reaches the next one's
+  brief. Claude Code or Codex can join the board directly or take over as coordinator,
+  and a task that needs the web gets a clean Chrome, or yours when it needs your logins.
 author: Cayden
 license: MIT
 homepage: https://github.com/cayden970207/thoth
 kind: standalone
 requires_hermes: ">=0.22.5"
-tags: [multi-agent, coordination, claude-code, codex, delegation, memory, git]
+tags: [multi-agent, collaboration, agent-harness, coordination, claude-code, codex, code-review, git]
 
 provides_tools:
   - thoth_init

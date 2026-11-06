@@ -122,7 +122,8 @@ async def action(body: dict) -> dict[str, Any]:
             result = svc.merge(path, task, override=bool(body.get("override")))
         elif kind == "assign":
             result = svc.assign(path, task, agent=str(body.get("agent") or ""), instructions=str(body.get("instructions") or ""),
-                                model=str(body.get("model") or ""), effort=str(body.get("effort") or ""))
+                                model=str(body.get("model") or ""), effort=str(body.get("effort") or ""),
+                                browser=str(body.get("browser")) if "browser" in body else None)
         elif kind == "review":
             result = svc.review(path, task, reviewer=str(body.get("reviewer") or ""), model=str(body.get("model") or ""), effort=str(body.get("effort") or ""))
         elif kind == "cancel":
@@ -139,7 +140,8 @@ async def action(body: dict) -> dict[str, Any]:
         elif kind == "update":
             result = svc.update_task(path, task, title=str(body.get("title") or ""), detail=str(body.get("detail") or ""), agent=str(body.get("agent") or ""),
                                      kind=str(body.get("kind") or ""), role=str(body.get("role") or ""),
-                                     model=body.get("model") if "model" in body else None, effort=body.get("effort") if "effort" in body else None)
+                                     model=body.get("model") if "model" in body else None, effort=body.get("effort") if "effort" in body else None,
+                                     browser=str(body.get("browser")) if "browser" in body else None)
         elif kind == "plan":
             result = svc.plan(path, body.get("tasks") or [])
         elif kind == "note":

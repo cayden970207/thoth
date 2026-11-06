@@ -563,3 +563,100 @@ def test_a_new_preview_stops_apps_left_by_an_earlier_process(repo):
     (previews / ".thoth-run.pid").write_text(str(orphan.pid))
     preview._sweep_orphans(repo / ".thoth" / "previews")
     assert orphan.wait(5) is not None and not (previews / ".thoth-run.pid").exists()
+
+
+def test_browser_reaches_the_cli_and_the_brief_but_never_a_review(repo):
+    from thoth_core import browser as web
+    from thoth_core.agents import ClaudeDriver, CodexDriver
+    assert [web.normalize(v) for v in (None, "off", "Clean", "user's chrome", "my chrome")] == ["", "", "clean", "user", "user"]
+    with pytest.raises(BrainError):
+        web.normalize("firefox")
+    clean, user = web.spec("clean"), web.spec("user")
+    assert web.PACKAGE in clean.args and {"--headless", "--isolated", "--no-usage-statistics", "--redactNetworkHeaders"} <= set(clean.args)
+    assert "--autoConnect" in user.args and "--headless" not in user.args and "--no-performance-crux" in user.args
+    c = ClaudeDriver({}).command(kind="build", session_id="", mcp=None, browser=clean)
+    assert json.loads(c[c.index("--mcp-config") + 1])["mcpServers"]["browser"]["args"] == clean.args
+    assert "mcp__browser" in c[c.index("--allowedTools") + 1].split(",")
+    assert "--mcp-config" not in ClaudeDriver({}).command(kind="review", session_id="", mcp=None, browser=clean)
+    x = " ".join(CodexDriver({}).command(kind="build", session_id="", mcp=None, browser=user))
+    assert "mcp_servers.browser.args=" in x and "--autoConnect" in x and 'mcp_servers.browser.default_tools_approval_mode="approve"' in x
+    assert "mcp_servers.browser" not in " ".join(CodexDriver({}).command(kind="review", session_id="", mcp=None, browser=user))
+    # Stored on the task and explained in its brief.
+    svc = Thoth(mcp_launcher=None)
+    svc.init(str(repo))
+    out = svc.plan(str(repo), [{"title": "Study the current site", "agent": "codex", "kind": "research", "browser": "clean"}, {"title": "Build", "agent": "claude"}])
+    assert out["created"][0]["browser"] == "clean" and "browser" not in out["created"][1]
+    brain = Brain.open(repo)
+    task = {**brain.task(1), "branch": "thoth/T1-x", "base_ref": "main", "base_commit": "abc1234"}
+    assert "fresh headless Chrome" in build_brief(brain, task, agent="codex", browser="clean")
+    assert "## Web browser" not in build_brief(brain, task, agent="codex")
+    mine = build_brief(brain, task, agent="codex", browser="user")
+    assert "Open your own tab" in mine and "Only look" in mine and "close_page" in mine
+    assert svc.update_task(str(repo), "T1", browser="user")["browser"] == "user"
+    assert "browser" not in svc.update_task(str(repo), "T1", browser="off")
+
+
+def test_your_chrome_must_be_open_before_anything_starts(repo, monkeypatch, tmp_path):
+    import socket
+    from thoth_core import browser as web
+    port_file = tmp_path / "DevToolsActivePort"
+    monkeypatch.setattr(web, "devtools_port_file", lambda: port_file)
+    assert not web.user_chrome_open()  # the switch was never turned on
+    srv = socket.socket()
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(1)
+    port_file.write_text(f"{srv.getsockname()[1]}\n/devtools/browser/abc\n")
+    assert web.user_chrome_open()
+    srv.close()
+    assert not web.user_chrome_open()  # a stale file from a Chrome that has quit
+    monkeypatch.setattr(web, "npx", lambda: "/opt/node/bin/npx")
+    monkeypatch.setattr(web, "_node_ok", lambda folder: (True, ""))
+    monkeypatch.setattr(web, "chrome_installed", lambda: True)
+    assert web.ready("clean") == (True, "")
+    monkeypatch.setattr(Thoth, "_driver", lambda self, agent: object())
+    svc = Thoth(mcp_launcher=None)
+    svc.init(str(repo))
+    svc.plan(str(repo), [{"title": "Read my store's theme settings", "agent": "codex"}])
+    with pytest.raises(BrainError, match="chrome://inspect/#remote-debugging"):
+        svc.assign(str(repo), "T1", browser="user")
+    assert Brain.open(repo).runs() == [] and Brain.open(repo).task(1)["browser"] == "user"  # nothing started; the choice is kept
+
+
+def test_browser_runs_say_so_on_the_approval_card(repo, monkeypatch):
+    plugin = _load_plugin()
+    ctx = FakeCtx()
+    plugin.register(ctx)
+
+    class FakeDriver:
+        def available(self):
+            return True, "/usr/local/bin/codex"
+
+    monkeypatch.setattr(plugin, "driver_for", lambda agent, settings=None: FakeDriver())
+    monkeypatch.setattr(plugin.web, "ready", lambda mode: (True, ""))
+    json.loads(ctx.tools["thoth_init"]({"project": str(repo)}, session_id="s1"))
+    json.loads(ctx.tools["thoth_plan"]({"project": str(repo), "tasks": [{"title": "Study the site", "agent": "codex", "browser": "clean"}]}, session_id="s1"))
+    hook = ctx.hooks["pre_tool_call"]
+    plain = hook(tool_name="thoth_assign", args={"project": str(repo), "task": "T1", "browser": "off"}, session_id="s1")
+    assert "Chrome" not in plain["message"] and ":web-" not in plain["rule_key"]
+    clean = hook(tool_name="thoth_assign", args={"project": str(repo), "task": "T1"}, session_id="s1")
+    assert "fresh Chrome without your logins" in clean["message"] and ":web-clean:" in clean["rule_key"]
+    mine = hook(tool_name="thoth_assign", args={"project": str(repo), "task": "T1", "browser": "user"}, session_id="s1")
+    assert "your own Chrome" in mine["message"] and "titles of your other tabs" in mine["message"] and ":web-user:" in mine["rule_key"]
+    monkeypatch.setattr(plugin.web, "ready", lambda mode: (False, "Your Chrome is not open to agents yet."))
+    blocked = hook(tool_name="thoth_assign", args={"project": str(repo), "task": "T1", "browser": "user"}, session_id="s1")
+    assert blocked["action"] == "block" and "not open to agents" in blocked["message"]
+
+
+def test_npx_runs_with_the_node_next_to_it(tmp_path, monkeypatch):
+    import os
+    from thoth_core import browser as web
+    node_bin = tmp_path / "hermes-node" / "bin"
+    node_bin.mkdir(parents=True)
+    (node_bin / "node").write_text("")
+    (node_bin / "npx").write_text("")
+    (tmp_path / "local-bin").mkdir()
+    (tmp_path / "local-bin" / "npx").symlink_to(node_bin / "npx")
+    assert web.node_dir(str(tmp_path / "local-bin" / "npx")) == str(node_bin)
+    monkeypatch.setattr(web, "npx", lambda: str(tmp_path / "local-bin" / "npx"))
+    env = web.with_node({"PATH": os.pathsep.join(["/usr/bin", "/bin"])})
+    assert env["PATH"].split(os.pathsep)[0] == str(node_bin) and web.with_node(env)["PATH"] == env["PATH"]

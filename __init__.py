@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any
 
 from .thoth_core import __version__
+from .thoth_core import browser as web
 from .thoth_core.agents import driver_for
 from .thoth_core.brain import Brain, BrainError, find_brain_root, parse_id
 from .thoth_core.briefing import board_lines
@@ -171,8 +172,15 @@ class ThothPlugin:
         else:
             head = f"{label} will work on {what}."
         lines = [head]
+        browse = ""
         if kind == "build":
             lines.append(f"It can only change this task's own copy of the project, and stops after {minutes} minutes at most.")
+            browse = web.normalize(args["browser"] if args.get("browser") is not None else task.get("browser"))
+            if browse:
+                ok, why = web.ready(browse)
+                if not ok:
+                    raise BrainError(why)
+                lines.append(web.CARD[browse])
         model = str(args.get("model") or task.get("model") or svc.settings.get(f"{agent}_model") or "").strip()
         effort = str(args.get("effort") or task.get("effort") or "").strip()
         lines.append("Model: " + (model or "default") + (f" · {effort} effort" if effort else "") + ".")
@@ -182,8 +190,10 @@ class ThothPlugin:
         extra = " ".join(str(args.get("instructions") or "").split())
         if extra:
             lines.append("Extra instructions: " + (extra[:300] + "…" if len(extra) > 300 else extra))
-        lines.append(f"Details: {detail} · {brain.root}/.thoth/worktrees/{task['ref']} · {note} · uses your {label} login and plan.")
-        key = f"thoth:{kind}:{agent}:{_short_hash(str(brain.root))}"
+        browser_detail = f" · browser: {web.PACKAGE} via npx, {'headless and temporary' if browse == 'clean' else 'attached to your Chrome'}" if browse else ""
+        lines.append(f"Details: {detail} · {brain.root}/.thoth/worktrees/{task['ref']} · {note}{browser_detail} · uses your {label} login and plan.")
+        # A browser is its own rule: "always allow" for plain builds never covers runs that browse, least of all in your Chrome.
+        key = f"thoth:{kind}:{agent}{':web-' + browse if browse else ''}:{_short_hash(str(brain.root))}"
         return "\n".join(lines), key
 
     def _self_assign(self, name: str, args: dict, svc: Thoth, project: str) -> bool:
@@ -414,7 +424,8 @@ class ThothPlugin:
             lines.append("Waiting on the user or coordinator: " + "; ".join(f"{n['title']} ({n['tool']} {n['task']})" for n in needs[:4]))
         lines.append("You coordinate: plan, assign, review, merge, and talk to the user. Claude Code and Codex do the work. "
                      "Do not write code, run tests, start servers, open browsers or write outside the project yourself: assign a task "
-                     "(kind qa for checks) and use thoth_preview to show a page. Record decisions with thoth_note.")
+                     "(kind qa for checks) and use thoth_preview to show a page. Record decisions with thoth_note. "
+                     "A task that must look at websites gets browser=clean; browser=user (the user's own Chrome and logins) only when it needs their logins.")
         return {"context": "\n".join(lines)}
 
     # -- slash command -----------------------------------------------------------
@@ -466,6 +477,10 @@ def doctor_text(settings: dict[str, Any]) -> str:
 
     lines.append(f"  {'✓' if shutil.which('git') else '✗'} git: {shutil.which('git') or 'not found'}")
     lines.append(f"  MCP server: {mcp_server_path()}")
+    ok, why = web.ready("clean")
+    lines.append(f"  {'✓' if ok else '✗'} Web browsing (clean Chrome): {web.PACKAGE} via {web.npx() or 'npx'}" + ("" if ok else f" — {why}"))
+    lines.append(f"  {'✓' if web.user_chrome_open() else '·'} Your Chrome: " + ("open to agents (remote debugging is on)" if web.user_chrome_open()
+                                                                              else "closed to agents (turn on at chrome://inspect/#remote-debugging when a task needs your logins)"))
     return "\n".join(lines)
 
 

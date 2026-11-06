@@ -296,10 +296,11 @@ function LogoSprite () {
     // Claude's spark in white, for its clay app tile.
     h('symbol', { key: 'claude-w', id: 'th-logo-claude-w', viewBox: LOGOS.claude.viewBox }, h('path', { d: LOGOS.claude.d, fill: '#fff' })))
 }
-// Each agent as an app icon: Claude's spark on clay, Codex's blossom on black, Hermes's face on lavender
-// (the portrait is cropped to the face so it still reads at 16px).
+// Each agent as an app icon: Claude's spark on clay, Codex's blossom on black, and Hermes's black-and-white
+// portrait on white, as on its own app icon. The view is the smallest circle around all of the ink (plus 3%),
+// so the round tile never cuts the hair or headband.
 function Logo ({ agent, size }) {
-  if (agent === 'hermes') return h('svg', { width: size, height: size, viewBox: '700 250 3600 3600', preserveAspectRatio: 'xMidYMid slice', 'aria-hidden': true, className: 'th-logo th-logo-hermes' }, h('use', { href: '#th-logo-hermes', width: 5487, height: 5487 }))
+  if (agent === 'hermes') return h('svg', { width: size, height: size, viewBox: '-249 58 6161 6161', 'aria-hidden': true, className: 'th-logo th-logo-hermes' }, h('use', { href: '#th-logo-hermes', width: 5487, height: 5487 }))
   const inner = Math.max(8, Math.round(size * (agent === 'codex' ? 0.54 : 0.58)))
   return h('svg', { width: inner, height: inner, 'aria-hidden': true, className: 'th-logo th-logo-' + agent }, h('use', { href: '#th-logo-' + (agent === 'claude' ? 'claude-w' : agent) }))
 }
@@ -856,7 +857,8 @@ function TaskCard ({ t, tk, sel, select, d }) {
   const media = tk.produced.filter(isMedia).slice(0, 4), docs = tk.produced.filter(f => !isMedia(f)).length
   return h('article', { className: 'th-tcard' + (sel ? ' th-sel' : '') + (tk.open ? ' th-working' : '') + (flashing(t.ref) ? ' th-flash' : ''), draggable: true, onDragStart: e => e.dataTransfer.setData('text/plain', t.ref), onClick: () => select(t.ref) },
     h('div', { className: 'th-top' }, h(Pair, { agent, reviewer: t.status !== 'todo' ? tk.reviewer : null, live: tk.open }),
-      h('div', { style: { minWidth: 0, flex: 1 } }, h('div', { className: 'th-ttl' }, t.title), h('div', { className: 'th-role' }, (t.role || KIND_LABEL[t.kind || 'code']) + ' · ' + t.ref))),
+      h('div', { style: { minWidth: 0, flex: 1 } }, h('div', { className: 'th-ttl' }, t.title), h('div', { className: 'th-role' }, (t.role || KIND_LABEL[t.kind || 'code']) + ' · ' + t.ref,
+        t.browser && agent !== 'hermes' ? h('span', { className: 'th-webmark', title: 'Browses the web with ' + webWords(t.browser) }, h(Icon, { name: 'globe', size: 11 })) : null))),
     media.length || docs ? h('div', { className: 'th-strip' },
       media.map(f => VIDEO.test(f) ? h('span', { key: f, className: 'th-vthumb' }, h(Icon, { name: 'play', size: 12, fill: true })) : h(Thumb, { key: f, task: t.ref, path: f, size: 40 })),
       docs ? h('span', { className: 'th-docchip', title: tk.produced.filter(f => !isMedia(f)).join('\n') }, h('span', { className: 'th-sheet' }, h('i'), h('i'), h('i')), plural(docs, 'file')) : null) : null,
@@ -968,6 +970,7 @@ function Inspector ({ snap, d, selected, tab, setTab, close }) {
       h('span', { className: 'th-k' }, h(Icon, { name: 'build', size: 14 }), 'Builder'), h('span', { className: 'th-person' }, h(Mini, { agent }), A(agent)),
       h('span', { className: 'th-k' }, h(Icon, { name: 'review', size: 14 }), 'Reviewer'), h('span', { className: 'th-person' }, h(Mini, { agent: tk.reviewer }), A(tk.reviewer)),
       h('span', { className: 'th-k' }, h(Icon, { name: 'chip', size: 14 }), 'Model'), h('span', null, h(ModelPicker, { agent, model: t.model || '', effort: t.effort || '', onChange: v => act({ action: 'update', task: t.ref, model: v.model, effort: v.effort }, () => `${t.ref} will use ${modelLabel(agent, v.model)}${v.effort ? ' · ' + v.effort + ' effort' : ''}`) })),
+      h('span', { className: 'th-k' }, h(Icon, { name: 'globe', size: 14 }), 'Web'), h('span', null, h(WebPicker, { agent, value: t.browser || '', onChange: v => act({ action: 'update', task: t.ref, browser: v }, () => `${t.ref} will work with ${webWords(v)}${tk.open ? ' from its next run' : ''}`) })),
       reachOf(snap, t.ref).length ? [
         h('span', { key: 'rk', className: 'th-k' }, h(Icon, { name: 'arrowr', size: 14 }), 'Reached'),
         h('span', { key: 'rv', className: 'th-reachlist' }, reachOf(snap, t.ref).map(e => h('span', { key: e.agent, className: 'th-reachrow', title: reachWords(e, t.ref) },
@@ -1163,8 +1166,8 @@ function ThothPage () {
     const first = !s.error && !s.projects.length && !s.reconnecting
     return h('div', { className: 'th-root' }, css, h('div', { className: 'th-emptypage' },
       h('div', { className: 'th-onb-logos' }, ['claude', 'hermes', 'codex'].map(a => h(Mini, { key: a, agent: a, size: a === 'hermes' ? 56 : 42 }))),
-      h('h2', null, offline || s.reconnecting ? 'Reconnecting to Hermes…' : s.error ? 'Thoth can’t reach its backend' : first ? 'One brain for your whole AI team' : 'Loading the shared brain…'),
-      h('p', null, offline ? 'Its backend is starting up. Thoth comes back by itself in a moment.' : s.error ? s.error + '. Make sure the Thoth plugin is enabled in Capabilities → Plugins.' : first ? 'Hermes plans, Claude Code and Codex build in parallel, review each other, and everything they decide and make stays in one place.' : ''),
+      h('h2', null, offline || s.reconnecting ? 'Reconnecting to Hermes…' : s.error ? 'Thoth can’t reach its backend' : first ? 'Agents working as one team' : 'Loading the team…'),
+      h('p', null, offline ? 'Its backend is starting up. Thoth comes back by itself in a moment.' : s.error ? s.error + '. Make sure the Thoth plugin is enabled in Capabilities → Plugins.' : first ? 'Each keeps its own harness. Hermes plans; the real Claude Code and Codex build side by side on your own logins and review each other, and every decision and version stays with the project.' : ''),
       first ? h('ol', { className: 'th-onb' },
         h('li', null, h('b', null, 'Open a chat in a git project'), h('span', null, 'Any folder with git works — code, a game, docs.')),
         h('li', null, h('b', null, 'Tell Hermes the goal'), h('span', null, '“Make a tiny pixel game: Codex draws the sprites, Claude builds it.”')),
@@ -1360,6 +1363,39 @@ function ModelPicker ({ agent, model, effort, onChange, compact = false }) {
         h('div', { key: 'e', className: 'th-effort' }, ['', ...efforts].map(e => h('button', { key: e || 'default', className: effort === e ? 'th-on' : '', onClick: () => onChange({ model, effort: e }) }, e || 'auto')))] : null) : null)
 }
 
+// Whether the agent gets a web browser: none, a fresh Chrome without logins, or the user's own Chrome.
+const WEB = {
+  '': { label: 'No browser', note: 'Works without the web' },
+  clean: { label: 'Clean Chrome', note: 'A fresh Chrome without your logins, deleted after the run' },
+  user: { label: 'Your Chrome', note: 'Your logins, in a tab of its own, only looking. Turn on remote debugging in Chrome first; Chrome asks you to allow each run' }
+}
+const webWords = v => v === 'user' ? 'your Chrome' : v === 'clean' ? 'a clean Chrome' : 'no browser'
+
+function WebPicker ({ agent, value, onChange }) {
+  const [open, setOpen, ref] = usePopover()
+  const btn = useRef(null)
+  const [pos, setPos] = useState(null)
+  if (agent === 'hermes') return h('span', { className: 'th-muted', style: { fontSize: 12 } }, 'Hermes doesn’t browse')
+  const v = WEB[value] ? value : ''
+  const toggle = e => {
+    e.stopPropagation()
+    if (!open && btn.current) {
+      const r = btn.current.getBoundingClientRect(), w = 280, room = innerHeight - r.bottom
+      const left = Math.max(8, Math.min(r.left, innerWidth - w - 8))
+      setPos(room < 260 ? { position: 'fixed', left, bottom: innerHeight - r.top + 6, top: 'auto', width: w } : { position: 'fixed', left, top: r.bottom + 6, width: w })
+    }
+    setOpen(o => !o)
+  }
+  return h('span', { className: 'th-switch', ref },
+    h('button', { ref: btn, className: 'th-modelbtn th-webbtn', onClick: toggle, title: 'Web browser for ' + AGENTS[agent].name },
+      v ? h(Icon, { name: 'globe', size: 12 }) : null, h('span', null, WEB[v].label),
+      h('svg', { width: 10, height: 10, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 2.4, strokeLinecap: 'round' }, h('path', { d: 'M7 10l5 5 5-5' }))),
+    open ? h('div', { className: 'th-menu th-modelmenu th-webmenu', style: pos || undefined },
+      h('div', { className: 'th-mm-sec' }, 'Web browser'),
+      Object.keys(WEB).map(k => h('button', { key: k || 'off', className: 'th-menu-it th-mm-it' + (v === k ? ' th-on' : ''), onClick: () => { setOpen(false); if (k !== v) onChange(k) } },
+        h('b', null, WEB[k].label), h('span', null, WEB[k].note)))) : null)
+}
+
 function usePopover () {
   const [open, setOpen] = useState(false)
   const ref = useRef(null)
@@ -1397,7 +1433,7 @@ function CopyButton ({ text, label = 'Copy' }) {
 
 function AddTask ({ snap, onDone }) {
   const [open, setOpen, ref] = usePopover()
-  const [f, setF] = useState({ title: '', detail: '', agent: 'claude', kind: 'code', role: '', depends: [], model: '', effort: '' })
+  const [f, setF] = useState({ title: '', detail: '', agent: 'claude', kind: 'code', role: '', depends: [], model: '', effort: '', browser: '' })
   const set = patch => setF(x => ({ ...x, ...patch }))
   const btn = useRef(null)
   const [pos, setPos] = useState(null)
@@ -1413,9 +1449,10 @@ function AddTask ({ snap, onDone }) {
   const tasks = snap.tasks || []
   const submit = () => {
     if (!f.title.trim()) { host.notify({ kind: 'warning', message: 'Give the task a title' }); return }
-    const spec = { title: f.title.trim(), detail: f.detail.trim(), agent: f.agent, kind: f.kind, role: f.role.trim(), depends_on: f.depends, model: f.model, effort: f.effort }
+    const spec = { title: f.title.trim(), detail: f.detail.trim(), agent: f.agent, kind: f.kind, role: f.role.trim(), depends_on: f.depends, model: f.model, effort: f.effort,
+      browser: f.agent === 'hermes' ? '' : f.browser }
     act({ action: 'plan', tasks: [spec] }, r => `Added ${r.created[0].task} for ${AGENTS[f.agent].name}`)
-    setF({ title: '', detail: '', agent: f.agent, kind: f.kind, role: '', depends: [], model: '', effort: '' }); setOpen(false); onDone && onDone()
+    setF({ title: '', detail: '', agent: f.agent, kind: f.kind, role: '', depends: [], model: '', effort: '', browser: '' }); setOpen(false); onDone && onDone()
   }
   return h('span', { className: 'th-switch', ref },
     h('button', { ref: btn, className: 'th-ib' + (open ? ' th-ib-on' : ''), title: 'Add a task (N)', 'aria-label': 'Add a task', onClick: () => (open ? setOpen(false) : show()) }, h(Icon, { name: 'plus', size: 16 })),
@@ -1430,6 +1467,9 @@ function AddTask ({ snap, onDone }) {
       h('div', { className: 'th-addrow' },
         h('input', { className: 'th-field', placeholder: 'Role (optional), e.g. Level designer', value: f.role, onChange: e => set({ role: e.target.value }) }),
         h(ModelPicker, { agent: f.agent, model: f.model, effort: f.effort, onChange: v => set(v), compact: true })),
+      f.agent !== 'hermes' ? [h('div', { key: 'ws', className: 'th-mm-sec' }, 'Web browser'),
+        h('div', { key: 'wb', className: 'th-kinds' }, Object.keys(WEB).map(k => h('button', { key: k || 'off', className: f.browser === k ? 'th-on' : '', title: WEB[k].note, onClick: () => set({ browser: k }) },
+          k ? h(Icon, { name: 'globe', size: 13 }) : null, WEB[k].label)))] : null,
       tasks.length ? [h('div', { key: 's', className: 'th-mm-sec' }, 'Starts after (its files are handed over)'),
         h('div', { key: 'd', className: 'th-kinds' }, tasks.map(t => h('button', { key: t.ref, className: f.depends.includes(t.ref) ? 'th-on' : '', title: t.title, onClick: () => set({ depends: f.depends.includes(t.ref) ? f.depends.filter(x => x !== t.ref) : [...f.depends, t.ref] }) }, t.ref + ' · ' + (t.title.length > 18 ? t.title.slice(0, 17) + '…' : t.title))))] : null,
       h('div', { className: 'th-conn-act', style: { justifyContent: 'flex-end', marginTop: 10 } },
@@ -1706,6 +1746,9 @@ height:100%;display:flex;flex-direction:column;color:var(--th-text);font-size:13
 .th-modelbtn{display:inline-flex;align-items:center;gap:5px;height:25px;padding:0 8px;border-radius:8px;border:1px solid var(--th-line2)!important;font-size:12px;font-weight:500;color:var(--th-text);background:var(--th-panel)!important;max-width:200px}
 .th-modelbtn span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.th-modelbtn svg:first-child{color:var(--th-hermes)}.th-modelbtn:hover{border-color:var(--th-select)!important}
 .th-modelbtn.th-compact{height:24px;padding:0 6px;font-size:11px;max-width:120px}
+.th-webbtn svg:first-child{color:var(--th-t2)}
+.th-webmenu .th-mm-it span{white-space:normal;line-height:1.4}
+.th-webmark{display:inline-flex;vertical-align:-1px;margin-left:5px;color:var(--th-t3)}
 .th-modelmenu{min-width:260px!important;padding:6px!important;max-height:380px;overflow:auto;z-index:60!important}
 .th-mm-sec{font-size:10.5px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--th-t4);margin:10px 4px 6px}
 .th-modelmenu .th-mm-sec:first-child{margin-top:4px}
@@ -1842,8 +1885,8 @@ textarea.th-cmd-input{resize:none;line-height:1.45;padding:4px 0;max-height:120p
 .th-root .th-mini,.th-root .th-av,.th-root .th-cursor-tag b{display:inline-grid;place-items:center;flex-shrink:0;overflow:hidden;border:0!important;border-radius:30%;box-shadow:0 0 0 .5px rgba(23,23,28,.14),0 1px 2px rgba(23,23,28,.14),inset 0 1px 0 rgba(255,255,255,.18)!important}
 .th-root .th-mini-claude{background:linear-gradient(180deg,#E38A6B,#CD6542)!important}
 .th-root .th-mini-codex{background:linear-gradient(180deg,#2B2B30,#0C0C0E)!important;color:#fff!important}
-.th-root .th-mini-hermes{background:linear-gradient(180deg,#F3EFFF,#DDD5FC)!important;color:#1B1B20!important;border-radius:50%}
-.th-root .th-logo-codex{color:#fff}.th-root .th-logo-hermes{color:#1B1B20;width:100%!important;height:100%!important}
+.th-root .th-mini-hermes{background:#fff!important;color:#000!important;border-radius:50%}
+.th-root .th-logo-codex{color:#fff}.th-root .th-logo-hermes{color:#000;width:100%!important;height:100%!important}
 .th-pair{position:relative;display:inline-flex;flex-shrink:0}
 .th-pair .th-mini{margin:0!important}
 .th-pair-sub{position:absolute;right:-5px;bottom:-5px;display:inline-flex;border-radius:6px;box-shadow:0 0 0 2px var(--th-panel)}

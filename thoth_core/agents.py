@@ -12,7 +12,9 @@ Permissions are deliberately narrow and are never chosen by a model:
 * review runs: read-only (Claude Code default mode with a read-only git
   allow-list; Codex ``--sandbox read-only``).
 
-No driver ever passes a "dangerously skip permissions" style flag.
+No driver ever passes a "dangerously skip permissions" style flag. A build run on a
+task with a browser also gets the Chrome DevTools MCP server (see browser.py); a
+review never does.
 """
 
 from __future__ import annotations
@@ -129,10 +131,13 @@ class RunState:
 
 @dataclass
 class McpSpec:
-    """How the agent should launch the Thoth MCP server for this run."""
+    """How the agent should launch an MCP server for this run (Thoth's own, or the browser)."""
 
     command: str
     args: list[str]
+
+
+BROWSER_SERVER = "browser"  # the name agents see for the browser tools (see browser.py)
 
 
 def _short(text: str, limit: int = 160) -> str:
@@ -160,7 +165,8 @@ class Driver:
             return False, f"{self.label} CLI ('{self.binary}') was not found on PATH; install it or set {self.name}_path"
         return True, path
 
-    def command(self, *, kind: str, session_id: str, mcp: McpSpec | None, model: str = "", effort: str = "", name: str = "") -> list[str]:
+    def command(self, *, kind: str, session_id: str, mcp: McpSpec | None, model: str = "", effort: str = "", name: str = "",
+                browser: McpSpec | None = None) -> list[str]:
         raise NotImplementedError
 
     EFFORTS: tuple[str, ...] = ()
@@ -196,7 +202,8 @@ class ClaudeDriver(Driver):
     # --sandbox workspace-write, and it lets Claude run the tests it writes.
     SANDBOX = {"sandbox": {"enabled": True, "autoAllowBashIfSandboxed": True, "allowUnsandboxedCommands": False}}
 
-    def command(self, *, kind: str, session_id: str, mcp: McpSpec | None, model: str = "", effort: str = "", name: str = "") -> list[str]:
+    def command(self, *, kind: str, session_id: str, mcp: McpSpec | None, model: str = "", effort: str = "", name: str = "",
+                browser: McpSpec | None = None) -> list[str]:
         cmd = [self.resolve() or self.binary, "-p", "--output-format", "stream-json", "--verbose"]
         if name:
             cmd += ["--name", name[:80]]
@@ -228,10 +235,16 @@ class ClaudeDriver(Driver):
             cmd += ["--effort", effort]
         if session_id:
             cmd += ["--resume", session_id]
+        servers: dict[str, Any] = {}
         if mcp is not None:
-            config = {"mcpServers": {"thoth": {"type": "stdio", "command": mcp.command, "args": mcp.args}}}
-            cmd += ["--mcp-config", json.dumps(config)]
+            servers["thoth"] = {"type": "stdio", "command": mcp.command, "args": mcp.args}
             allowed.append("mcp__thoth")
+        if browser is not None and kind != "review":
+            # Runs outside Claude's shell sandbox, like any MCP server: the browser reaches the web, the shell still cannot.
+            servers[BROWSER_SERVER] = {"type": "stdio", "command": browser.command, "args": browser.args}
+            allowed.append("mcp__" + BROWSER_SERVER)
+        if servers:
+            cmd += ["--mcp-config", json.dumps({"mcpServers": servers})]
         if allowed:
             cmd += ["--allowedTools", ",".join(dict.fromkeys(allowed))]
         return cmd
@@ -332,7 +345,8 @@ class CodexDriver(Driver):
         CodexDriver._catalog = out
         return out
 
-    def command(self, *, kind: str, session_id: str, mcp: McpSpec | None, model: str = "", effort: str = "", name: str = "") -> list[str]:
+    def command(self, *, kind: str, session_id: str, mcp: McpSpec | None, model: str = "", effort: str = "", name: str = "",
+                browser: McpSpec | None = None) -> list[str]:
         exe = self.resolve() or self.binary
         sandbox = "read-only" if kind == "review" else "workspace-write"
         if session_id:
@@ -357,6 +371,17 @@ class CodexDriver(Driver):
                 "-c", f"mcp_servers.thoth.command={json.dumps(mcp.command)}",
                 "-c", f"mcp_servers.thoth.args={json.dumps(mcp.args)}",
                 "-c", 'mcp_servers.thoth.default_tools_approval_mode="approve"',
+            ]
+        if browser is not None and kind != "review":
+            # The browser tools are pre-approved for the same reason; the user approved the browser on the run's card.
+            # Opening Chrome and the first page can take a while, hence the longer timeouts.
+            key = "mcp_servers." + BROWSER_SERVER
+            cmd += [
+                "-c", f"{key}.command={json.dumps(browser.command)}",
+                "-c", f"{key}.args={json.dumps(browser.args)}",
+                "-c", f'{key}.default_tools_approval_mode="approve"',
+                "-c", f"{key}.startup_timeout_sec=60",
+                "-c", f"{key}.tool_timeout_sec=180",
             ]
         cmd.append("-")  # prompt from stdin
         return cmd
