@@ -1,0 +1,108 @@
+name: thoth
+version: 0.1.0
+manifest_version: 2
+api_version: 1
+description: >-
+  One shared brain for Claude Code, Codex and Hermes. Hermes coordinates: it plans
+  tasks onto a shared board, starts the real Claude Code and Codex CLIs on them, each
+  in its own git worktree, has them cross-review each other and merges the results.
+  Goal, decisions, handoffs, progress and every version live in the project's
+  .thoth/ folder, so any of the three tools can pick up where another left off, and
+  the coordinator role can move to Claude Code or Codex through the bundled MCP server.
+author: Cayden
+license: MIT
+homepage: https://github.com/cayden970207/thoth
+kind: standalone
+requires_hermes: ">=0.22.0"
+tags: [multi-agent, coordination, claude-code, codex, delegation, memory, git]
+
+provides_tools:
+  - thoth_init
+  - thoth_plan
+  - thoth_assign
+  - thoth_review
+  - thoth_wait
+  - thoth_status
+  - thoth_note
+  - thoth_merge
+  - thoth_context
+  - thoth_cancel
+  - thoth_update_task
+  - thoth_coordinator
+
+provides_hooks:
+  - pre_tool_call
+  - pre_llm_call
+
+config_schema:
+  default_agent:
+    type: str
+    default: claude
+    choices: [claude, codex]
+    label: Default worker
+    description: Agent used when a task has none.
+  claude_permission_mode:
+    type: str
+    default: acceptEdits
+    choices: [acceptEdits, default, plan]
+    label: Claude Code permission mode for build runs
+    description: acceptEdits lets Claude edit files in the task worktree; shell commands still need the allow-list below.
+  claude_allowed_tools:
+    type: list
+    default: []
+    label: Extra Claude Code allowed tools
+    description: 'Added to --allowedTools for build runs, e.g. "Bash(npm test:*)". Read-only git commands are always allowed.'
+  claude_model:
+    type: str
+    default: ""
+    label: Claude Code model
+    description: Empty uses your Claude Code default.
+  codex_model:
+    type: str
+    default: ""
+    label: Codex model
+    description: Empty uses your Codex default.
+  claude_path:
+    type: str
+    default: ""
+    label: Claude Code CLI path
+    description: Empty finds claude on PATH.
+  codex_path:
+    type: str
+    default: ""
+    label: Codex CLI path
+    description: Empty finds codex on PATH.
+  run_timeout_seconds:
+    type: int
+    default: 1800
+    label: Run timeout (seconds)
+  max_concurrent_runs:
+    type: int
+    default: 3
+    label: Max agents running at once (per project)
+  attach_mcp:
+    type: bool
+    default: true
+    label: Give agents the Thoth tools while they work
+    description: Starts the bundled MCP server for each run so agents can read the board and record decisions.
+  resume_sessions:
+    type: bool
+    default: true
+    label: Resume the agent's previous session when a task is re-assigned
+  remove_worktree_on_merge:
+    type: bool
+    default: true
+    label: Remove a task's worktree after it is merged (the branch is kept)
+  notify_on_complete:
+    type: bool
+    default: true
+    label: Post a message in the chat when a run finishes
+  inject_board:
+    type: bool
+    default: true
+    label: Tell Hermes about the board at the start of each turn in a Thoth project
+  env_passthrough:
+    type: list
+    default: []
+    label: Environment variables to pass to agents
+    description: Thoth strips API keys, tokens and Hermes variables from the agents' environment; list names to keep.
