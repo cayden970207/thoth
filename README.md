@@ -103,9 +103,10 @@ it recorded, so nobody pasted anything; each task ran in its own worktree; and C
 frontend found an overlapping-refresh race and an invalid-number-saved-as-zero bug. What did not change:
 a follow-up task starts a fresh session, so Claude re-read the backend about as often as it did by hand.
 
-**Who has the newest version.** After the arrow on a card are the agents whose work builds on it: a check
-when they have its newest version, the version they have (`v2`) when they built on an older one. A task whose dependency moved on
-says **1 change behind · Update**; one click (or `thoth_sync`) brings the newer version in.
+**Who has the newest version.** A task's **Reached** row lists the work built on it: a check when that task
+has its newest version, otherwise the version it has ("T2 is on v2 of 3"). The task that fell behind says
+**1 change behind · Update** on its card, and Needs you asks for it too; one click (or `thoth_sync`) brings
+the newer version in.
 
 ![Codex's Contacts API has a newer version than the one Claude Code's Contacts UI was built on](docs/screenshots/reach.png)
 
