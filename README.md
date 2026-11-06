@@ -180,16 +180,19 @@ merged into its branch.
 
 **Talk on the left, watch on the right.** Each project has one chat with Hermes, pinned in the sidebar in
 the project's colour. Beside it, Thoth docks a side window with the whole canvas (drag the divider to
-resize; **Full page** opens the full Thoth page), plus a **Thoth activity** tab with what needs you, who is
-working and what just happened. The side window follows the chat you are looking at, and what you say
+resize; **Full page** opens the full Thoth page), plus a **Team & brain** tab: the project in numbers
+(shipped, decisions, tokens, cache), what needs you, who is on the team, and the shared brain of decisions,
+reviews and versions, where a click on an entry opens its task. The team's faces in the side window's header
+show who is working and open that tab. The side window follows the chat you are looking at, and what you say
 shows up on the canvas as it happens: new tasks appear, a pill shows what Hermes is doing (*Hermes ·
 planning tasks*), the tasks its answer mentions light up, and approvals still happen right there in the
 chat. Typing on the full Thoth page goes to the same project chat and shows Hermes's answer on the page, so
 a project never ends up spread over many chats. **Beside the chat** on the Thoth page opens this layout, and
 Hermes's layout picker gets a **Chat + Thoth** template (sessions, the chat, Thoth) to come back to it any
 time. The side window sits with the chat, like Hermes's browser, so folding Hermes's files, review and
-terminal never hides it. Click a task and its details fill the side window (**‹ Canvas** goes back); once the
-window is wide enough they open in a column beside the canvas instead.
+terminal never hides it. Click a task and a small card rises from the bottom with its status, next step
+and action, while the canvas stays in view; **All details** grows it in place, and Esc or a click on the
+canvas puts it away. Once the window is wide enough, the details open in a column beside the canvas instead.
 
 **Seeing the result.** Every task that made a web page or a browser game gets an **Open preview** button
 on the Thoth page (and Hermes has `thoth_preview`). Thoth serves that task's folder on `127.0.0.1`, read-only, never hidden files such
@@ -302,7 +305,7 @@ environment passthrough.
   the bundled MCP server. Thoth changes no other setting of Claude Code or Codex, and reads neither one's
   login: they sign in on their own.
 - **Hermes Desktop layout and chats**: adds two panes (the Thoth side window, docked beside the conversation,
-  and Thoth activity) and one layout template, **Chat + Thoth**, which changes your layout only when you pick
+  and Team & brain) and one layout template, **Chat + Thoth**, which changes your layout only when you pick
   it. Closing a pane only hides it, and Layout → Reset brings it back. The first time Thoth sends
   a project's request it opens a chat for that project, then pins that chat and gives it the project's colour,
   once (unpin it and it stays unpinned). Which chat belongs to which project is kept in the plugin's data folder

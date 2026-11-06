@@ -999,19 +999,28 @@ function TaskPeek ({ snap, d, selected, expand, close }) {
       h('button', { className: 'th-tpk-more', onClick: expand }, 'All details', h(Icon, { name: 'up', size: 13 }))))
 }
 
-function Inspector ({ snap, d, selected, tab, setTab, close }) {
+// The project's shared brain: every decision, review and version, newest first. A row about a task opens it
+// when there is somewhere to open it (the side window's Team & brain tab).
+const BRAIN_KINDS = { decision: e => e.type === 'note_decision', review: e => /review/.test(e.type) || e.type === 'note_review', version: e => !!e.commit_sha }
+function BrainFeed ({ snap, d, onTask = null, limit = 40 }) {
   const [filter, setFilter] = useState('all')
-  if (tab === 'brain') {
-    const kinds = { decision: e => e.type === 'note_decision', review: e => /review/.test(e.type) || e.type === 'note_review', version: e => !!e.commit_sha }
-    const events = [...(snap.events || [])].reverse().filter(e => filter === 'all' || kinds[filter](e)).slice(0, 40)
-    return h('div', { className: 'th-pane' },
-      h('div', { className: 'th-filters' }, ['all', 'decision', 'review', 'version'].map(f => h('button', { key: f, className: filter === f ? 'th-on' : '', onClick: () => setFilter(f) }, f === 'all' ? 'All' : f[0].toUpperCase() + f.slice(1) + 's'))),
-      events.length ? events.map(e => h('div', { key: e.id, className: 'th-ev' },
+  const events = [...(snap.events || [])].reverse().filter(e => filter === 'all' || BRAIN_KINDS[filter](e)).slice(0, limit)
+  const refOf = e => { const tk = e.task_id && d && d.byTask[e.task_id]; return tk ? tk.ref : '' }
+  return [
+    h('div', { key: 'f', className: 'th-filters' }, ['all', 'decision', 'review', 'version'].map(f => h('button', { key: f, className: filter === f ? 'th-on' : '', 'aria-pressed': filter === f, onClick: () => setFilter(f) }, f === 'all' ? 'All' : f[0].toUpperCase() + f.slice(1) + 's'))),
+    events.length ? events.map(e => {
+      const ref = refOf(e), open = onTask && ref ? () => onTask(ref) : null
+      return h(open ? 'button' : 'div', { key: e.id, className: 'th-ev' + (open ? ' th-evlink' : ''), onClick: open || undefined, title: open ? 'Open ' + ref : undefined },
         h(Mini, { agent: AGENTS[e.actor] ? e.actor : 'hermes', size: 26 }),
         h('div', { className: 'th-ev-tx' }, h('b', null, AGENTS[e.actor] ? AGENTS[e.actor].name : e.actor), ' ', prettyEvent(e.message, e.actor),
           e.commit_sha ? h('span', { className: 'th-q th-mono' }, short(e.commit_sha)) : null,
-          h('time', null, ago(e.ts))))) : h('div', { className: 'th-none' }, 'Decisions, reviews and versions from every agent show up here.'))
-  }
+          h('time', null, ago(e.ts))))
+    }) : h('div', { key: 'n', className: 'th-none' }, 'Decisions, reviews and versions from every agent show up here.')
+  ]
+}
+
+function Inspector ({ snap, d, selected, tab, setTab, close }) {
+  if (tab === 'brain') return h('div', { className: 'th-pane' }, h(BrainFeed, { snap, d }))
   const t = (snap.tasks || []).find(x => x.ref === selected)
   if (!t) return h('div', { className: 'th-pane th-none' }, 'Select a task on the canvas or the board.')
   const tk = d.byTask[t.id], agent = t.agent || 'claude'
@@ -1324,7 +1333,7 @@ function useChatProject () {
   return stored || runtime || ''
 }
 
-function SideHead ({ s, snap, onFull }) {
+function SideHead ({ s, snap, onFull, team = false }) {
   const project = s.projects.find(p => p.path === s.project) || { name: projectName(snap.project) }
   const tasks = snap.tasks || [], merged = tasks.filter(t => t.status === 'merged').length
   const busy = Object.values(snap.agents || {}).some(a => a.busy)
@@ -1333,7 +1342,22 @@ function SideHead ({ s, snap, onFull }) {
     h('span', { className: 'th-muted' }, `${merged} of ${tasks.length} shipped`),
     h('span', { className: 'th-sync' + (busy ? '' : ' th-idle') }, h(Icon, { name: 'sync', size: 13 }), busy ? 'Live' : 'Up to date'),
     h('span', { className: 'th-ospacer' }),
+    team ? h(TeamDots, { snap }) : null,
     h('button', { className: 'th-chip', title: 'Open the full Thoth page', onClick: onFull }, h(Icon, { name: 'expand', size: 13 }), 'Full page'))
+}
+
+// The team at a glance in the side window's header: who is working right now (a ring in their colour).
+// A click opens the Team & brain tab beside it.
+const showTeam = () => { try { if (typeof host.revealPane === 'function') host.revealPane('thoth:activity') } catch (e) {} }
+function TeamDots ({ snap }) {
+  const coord = snap.meta.coordinator || 'hermes'
+  const order = [coord, ...['claude', 'codex', 'hermes'].filter(a => a !== coord)]
+  const agents = snap.agents || {}, workers = snap.workers || {}
+  const busy = order.filter(a => agents[a] && agents[a].busy)
+  const label = (busy.length ? busy.map(a => AGENTS[a].name).join(' and ') + (busy.length > 1 ? ' are' : ' is') + ' working. ' : '') + 'Open Team & brain'
+  return h('button', { className: 'th-teamdots', onClick: showTeam, title: label, 'aria-label': label },
+    h('span', { className: 'th-teamstack' }, order.map(a => h('span', { key: a, className: 'th-tdot' + (agents[a] && agents[a].busy ? ' th-busy' : '') + (workers[a] && !workers[a].ready ? ' th-tdot-off' : ''), style: { '--c': AGENTS[a].color } }, h(Mini, { agent: a, size: 22 })))),
+    busy.length ? h('span', { className: 'th-teamlive', style: { '--c': AGENTS[busy[0]].color } }, h('i', { className: 'th-pulse' }), busy.length + ' working') : null)
 }
 
 function SideAsk ({ snap, chat }) {
@@ -1408,11 +1432,11 @@ function ThothSide () {
     if (full && !wide) setFull(false); else close()
   }
   return h('div', { className: 'th-root th-side', ref: root, onKeyDown: onKey }, css,
-    h(SideHead, { s, snap, onFull: () => host.navigate('/thoth') }),
+    h(SideHead, { s, snap, team: true, onFull: () => host.navigate('/thoth') }),
     h('div', { className: 'th-sidebody' },
       h(SideAsk, { snap, chat }),
       needs.length ? h('div', { className: 'th-card th-sideneed' }, h(NeedRow, { n: needs[0], select, next: true, inline: true }),
-        needs.length > 1 ? h('span', { className: 'th-muted th-sidemore' }, '+' + (needs.length - 1) + ' more') : null) : null,
+        needs.length > 1 ? h('button', { className: 'th-linkbtn th-sidemore', title: 'See everything that needs you in Team & brain', onClick: showTeam }, '+' + (needs.length - 1) + ' more') : null) : null,
       h('section', { className: 'th-sidews' + (open ? ' th-open' : '') + (wide ? ' th-wide' : '') + (full ? ' th-full' : '') },
         h('div', { className: 'th-surface' },
           view === 'canvas' ? h(Canvas, { snap, d, selected: open ? sel : '', select, project: s.project, inset: peek ? sheetH + 10 : 0, onBackground: open ? close : null })
@@ -1440,7 +1464,8 @@ function ThothSide () {
       s.viewer ? h(Viewer, { v: s.viewer, snap, close: () => { store.viewer = null; emit() } }) : null))
 }
 
-// A compact companion pane: what needs you, who is working, what just happened.
+// Team & brain, the tab beside the Thoth side window: the project in numbers, what needs you, who is on the
+// team and the shared brain (decisions, reviews, versions). Anything about a task opens it in the Thoth tab.
 function ThothActivity () {
   const s = useStore()
   useChatProject()
@@ -1450,15 +1475,15 @@ function ThothActivity () {
   const snap = s.snap, d = derive(snap)
   // A task picked here opens in the Thoth tab next door, so the chat stays where it is.
   const select = ref => { if (ref) { store.sidePick = { ref, at: Date.now() }; emit() } showSide() }
-  const events = [...(snap.events || [])].slice(-12).reverse()
   return h('div', { className: 'th-root th-side th-activity' }, css,
     h(SideHead, { s, snap, onFull: () => host.navigate('/thoth') }),
     h('div', { className: 'th-sidebody' },
+      h(ProjectWidget, { snap }),
       h(NeedsWidget, { snap, d, select }),
       h(Roster, { snap }),
-      h('div', { className: 'th-card th-widget' }, h('div', { className: 'th-wlabel' }, h('span', null, 'Just now')),
-        events.length ? events.map(e => h('div', { key: e.id, className: 'th-evrow' }, h(Mini, { agent: AGENTS[e.actor] ? e.actor : 'hermes', size: 18 }),
-          h('span', null, capFirst(prettyEvent(e.message, e.actor))), h('em', null, ago(e.ts)))) : h('div', { className: 'th-calm' }, h('span', null, 'Nothing yet.')))))
+      h('div', { className: 'th-card th-widget th-brainw' },
+        h('div', { className: 'th-wlabel' }, h('span', null, 'Shared brain'), h('span', null, 'decisions, reviews and versions')),
+        h(BrainFeed, { snap, d, onTask: select }))))
 }
 
 const pause = ms => new Promise(r => setTimeout(r, ms))
@@ -2168,9 +2193,26 @@ height:100%;display:flex;flex-direction:column;color:var(--th-text);font-size:13
 .th-sideempty{margin:auto;max-width:300px;display:flex;flex-direction:column;align-items:center;gap:10px;text-align:center;padding:24px;font-size:12.5px;color:var(--th-t3)}
 .th-sideempty b{font-size:14px;color:var(--th-text)}
 .th-seg-plain .th-thumb{display:none}.th-seg-plain button.th-on{background:var(--th-sunken);color:var(--th-text);border-radius:999px}
-.th-activity .th-sidebody{gap:10px}.th-evrow{display:grid;grid-template-columns:18px minmax(0,1fr) auto;gap:8px;align-items:center;font-size:12px;padding:5px 0;color:var(--th-t2)}
-.th-evrow span{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.th-evrow em{font-style:normal;font-size:11px;color:var(--th-t4)}
-.th-activity .th-trow{grid-template-columns:22px 150px minmax(0,1fr);gap:8px}.th-activity .th-trow .th-tn{display:none}
+/* Team & brain: the overview widgets, sized for a side window. */
+.th-activity .th-sidebody{gap:10px}.th-activity .th-sidebody>*{flex-shrink:0}
+.th-activity .th-widget{min-height:0;padding:14px 16px 12px}
+.th-activity .th-project{gap:14px}.th-activity .th-ptitle{font-size:19px}.th-activity .th-pgoal{font-size:13px}
+.th-activity .th-ring{transform:scale(.84);transform-origin:top right}
+.th-activity .th-trow{gap:8px}
+.th-activity .th-calm{margin:0;padding:0 0 2px}
+.th-brainw .th-wlabel>span:last-child{font-weight:500;color:var(--th-t4)}
+.th-brainw .th-filters{margin:0 0 4px}
+.th-ev.th-evlink{width:calc(100% + 12px);margin:0 -6px;padding:7px 6px;border-radius:12px;text-align:left;font:inherit;color:inherit;cursor:pointer;transition:background .2s}
+.th-ev.th-evlink:hover{background:var(--th-hover)}
+/* The team in the Thoth tab header: who is working right now, a click away from Team & brain. */
+.th-teamdots{display:inline-flex;align-items:center;gap:7px;height:30px;padding:0 9px 0 5px;border-radius:999px;font-size:12px;font-weight:600;color:var(--th-t2);transition:background .2s,color .2s}
+.th-teamdots:hover{background:var(--th-hover);color:var(--th-text)}
+.th-teamstack{display:inline-flex;align-items:center}
+.th-tdot{position:relative;display:inline-flex;margin-left:-7px;border-radius:50%;box-shadow:0 0 0 2px var(--th-bg)}.th-tdot:first-child{margin-left:0}
+.th-tdot .th-mini{margin:0!important;border:0}
+.th-tdot.th-busy{z-index:1;box-shadow:0 0 0 2px var(--th-bg),0 0 0 3.5px var(--c)}
+.th-tdot-off .th-mini{opacity:.4;filter:grayscale(1)}
+.th-teamlive{display:inline-flex;align-items:center;gap:6px}
 .th-hermeswork{position:absolute;top:12px;left:14px;z-index:6;display:flex;align-items:center;gap:7px;height:30px;padding:0 12px 0 5px;border-radius:999px;background:var(--th-panel);box-shadow:var(--th-shadow);font-size:12px;font-weight:600;color:var(--th-text);animation:th-pop .35s var(--th-spring)}
 .th-dots{display:inline-flex;gap:3px}.th-dots b{width:4px;height:4px;border-radius:50%;background:var(--th-t3);animation:th-breathe 1.2s ease-in-out infinite}.th-dots b:nth-child(2){animation-delay:.2s}.th-dots b:nth-child(3){animation-delay:.4s}
 @keyframes th-pop{from{opacity:0;transform:translateY(-4px) scale(.96)}to{opacity:1;transform:none}}
@@ -2511,7 +2553,7 @@ export default {
       // The whole canvas docked to the right of the conversation (drag the divider to resize), and a compact
       // activity tab with it. Two panes, so closing one only hides it instead of disabling Thoth.
       { id: 'canvas', area: 'panes', title: 'Thoth', data: { ...SIDE_PANE, dock: { pane: 'workspace', pos: 'right' } }, render: () => h(ThothSide) },
-      { id: 'activity', area: 'panes', title: 'Thoth activity', data: { ...SIDE_PANE, dock: { pane: 'thoth:canvas', pos: 'center' } }, render: () => h(ThothActivity) },
+      { id: 'activity', area: 'panes', title: 'Team & brain', data: { ...SIDE_PANE, dock: { pane: 'thoth:canvas', pos: 'center' } }, render: () => h(ThothActivity) },
       { id: 'layout', area: 'layouts', title: 'Chat + Thoth', order: 50, data: THOTH_LAYOUT }
     ])
     followHermes()
