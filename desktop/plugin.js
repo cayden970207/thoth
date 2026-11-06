@@ -299,7 +299,8 @@ function OverviewStrip ({ snap, select, expand }) {
     h('span', { className: 'th-ospacer' }),
     needs.length ? [h(NeedRow, { key: 'n', n: needs[0], select, next: true, inline: true }),
       needs.length > 1 ? h('button', { key: 'm', className: 'th-linkbtn th-omore', onClick: expand }, '+' + (needs.length - 1) + ' more') : null]
-      : h('span', { className: 'th-ost th-muted' }, h(Icon, { name: 'flag', size: 13 }), ' Nothing needs you'))
+      : h('span', { className: 'th-ost th-muted' }, h(Icon, { name: 'flag', size: 13 }), ' Nothing needs you'),
+    h('button', { className: 'th-ib th-ostoggle', onClick: expand, title: 'Show the overview', 'aria-label': 'Show the overview', 'aria-expanded': false }, h('svg', { width: 12, height: 12, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 2.4, strokeLinecap: 'round', strokeLinejoin: 'round' }, h('path', { d: 'M7 10l5 5 5-5' }))))
 }
 
 const compact = n => n >= 1e6 ? (n / 1e6).toFixed(n >= 1e7 ? 0 : 1) + 'M' : n >= 1e3 ? Math.round(n / 1e3) + 'k' : String(n)
@@ -717,8 +718,10 @@ function ThothPage () {
       h('button', { className: 'th-chip', title: 'Hand coordination to ' + AGENTS[nextCoord].name, onClick: () => act({ action: 'coordinator', agent: nextCoord }, r => `${AGENTS[r.coordinator].name} coordinates now. Hermes can print the setup command.`) },
         h(Icon, { name: 'crown', size: 13, fill: true, style: { color: '#e0a81e' } }), h(Mini, { agent: coord, size: 18 }), AGENTS[coord].name)),
     h('div', { className: 'th-content' },
-      h(CommandBar, { snap, project, d, overview, setOverview }),
-      overview ? h(Metrics, { snap, d, select }) : h(OverviewStrip, { snap, select, expand: () => setOverview(true) }),
+      overview
+        ? h('div', { className: 'th-ovwrap' }, h(Metrics, { snap, d, select }),
+            h('button', { className: 'th-ovhandle', onClick: () => setOverview(false), title: 'Collapse the overview', 'aria-label': 'Collapse the overview', 'aria-expanded': true }, h('svg', { width: 12, height: 12, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 2.4, strokeLinecap: 'round', strokeLinejoin: 'round' }, h('path', { d: 'M7 14l5-5 5 5' }))))
+        : h(OverviewStrip, { snap, select, expand: () => setOverview(true) }),
       h('section', { className: 'th-workspace' + (view === 'board' ? ' th-boardmode' : '') + (open ? ' th-open' : '') },
         h('div', { className: 'th-surface' },
           view === 'canvas' ? h(Canvas, { snap, d, selected: sel, select, project: s.project }) : h(Board, { snap, d, selected: sel, select, askMerge: setConfirm }),
@@ -737,8 +740,8 @@ function ThothPage () {
             h('div', { className: 'th-tabs' }, h('button', { className: tab === 'task' ? 'th-on' : '', onClick: () => setTab('task') }, 'Task'), h('button', { className: tab === 'brain' ? 'th-on' : '', onClick: () => setTab('brain') }, 'Shared brain')),
             h('button', { className: 'th-closeI', onClick: () => setOpen(false), 'aria-label': 'Close panel' }, h(Icon, { name: 'x' }))),
           h(Inspector, { snap, d, selected: sel, tab, setTab }))),
-      keys ? h(Keys, { onClose: () => setKeys(false) }) : null)
-  )
+      keys ? h(Keys, { onClose: () => setKeys(false) }) : null),
+    h(CommandBar, { snap, project, d }))
 }
 
 async function sendToHermes (text) {
@@ -755,7 +758,7 @@ async function sendToHermes (text) {
   return ''
 }
 
-function CommandBar ({ snap, project, d, overview, setOverview }) {
+function CommandBar ({ snap, project, d }) {
   const [text, setText] = useState('')
   const [sending, setSending] = useState(false)
   const tasks = snap.tasks || []
@@ -779,15 +782,13 @@ function CommandBar ({ snap, project, d, overview, setOverview }) {
     setText('')
     host.notify({ kind: 'info', message: where === 'open' ? 'Sent to your open Hermes chat' : where === 'new' ? 'Sent to Hermes in a new chat — approve agent launches there' : 'Put in the Hermes composer — press Enter to send' })
   }
-  return h('section', { className: 'th-cmd' },
+  return h('section', { className: 'th-cmd th-composer' },
+    chips.length ? h('div', { className: 'th-cmd-chips' }, chips.map(c => h('button', { key: c, className: 'th-cmd-chip', title: 'Send to Hermes: ' + c, onClick: () => send(c) }, h(Icon, { name: 'spark', size: 11 }), c))) : null,
     h('div', { className: 'th-cmd-box' },
       h(Mini, { agent: 'hermes', size: 26 }),
       h('kbd', { className: 'th-kbd', title: 'Press / to type here' }, '/'),
       h('input', { className: 'th-cmd-input', value: text, placeholder: 'Tell the team what to do next — e.g. “Make the coins shinier, then update the game”', onChange: e => setText(e.target.value), onKeyDown: e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send() } } }),
-      h('button', { className: 'th-btn th-sm th-primary', disabled: sending || !text.trim(), onClick: () => send() }, sending ? 'Sending…' : 'Send to Hermes')),
-    h('div', { className: 'th-cmd-chips' }, chips.map(c => h('button', { key: c, className: 'th-cmd-chip', onClick: () => send(c) }, c)),
-      setOverview ? h('button', { className: 'th-ovtoggle', onClick: () => setOverview(!overview), 'aria-expanded': overview }, overview ? 'Hide overview' : 'Show overview',
-        h('svg', { width: 11, height: 11, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 2.4, strokeLinecap: 'round', style: { transform: overview ? 'rotate(180deg)' : 'none', transition: 'transform .3s' } }, h('path', { d: 'M7 10l5 5 5-5' }))) : null))
+      h('button', { className: 'th-btn th-sm th-primary', disabled: sending || !text.trim(), onClick: () => send() }, sending ? 'Sending…' : 'Send to Hermes')))
 }
 
 let modelCatalog = null
@@ -1004,7 +1005,7 @@ height:100%;display:flex;flex-direction:column;color:var(--th-text);font-size:13
 .th-stack{display:flex}.th-av{position:relative;width:28px;height:28px;border-radius:50%;display:grid;place-items:center;font-weight:700;font-size:11.5px;border:2px solid var(--th-panel);margin-left:-7px;transition:transform .4s var(--th-spring)}.th-av:first-child{margin-left:0}.th-av:hover{transform:translateY(-2px)}
 .th-av i{position:absolute;right:-2px;bottom:-2px;width:9px;height:9px;border-radius:50%;border:2px solid var(--th-panel);background:var(--th-t4)}.th-av.th-busy i{background:var(--th-ok)}
 .th-chip{display:inline-flex;align-items:center;gap:6px;height:28px;padding:0 10px;border-radius:9px;border:1px solid var(--th-line2)!important;font-weight:500;font-size:12.5px}.th-chip:hover{background:var(--th-hover)}
-.th-content{flex:1;overflow-y:auto;overflow-x:hidden;padding:18px 22px 22px;display:flex;flex-direction:column;gap:16px}
+.th-content{flex:1;overflow-y:auto;overflow-x:hidden;padding:16px 22px 10px;display:flex;flex-direction:column;gap:16px}
 .th-card{background:var(--th-panel);border:1px solid var(--th-line);border-radius:18px;box-shadow:var(--th-shadow)}
 .th-metrics{display:grid;grid-template-columns:minmax(0,.9fr) minmax(0,1.5fr) minmax(0,1.1fr);gap:14px}
 @media (max-width:1180px){.th-metrics{grid-template-columns:1fr 1fr}.th-metrics .th-wide{grid-column:1/-1;order:3}}
@@ -1147,7 +1148,14 @@ height:100%;display:flex;flex-direction:column;color:var(--th-text);font-size:13
 .th-cmd-box:focus-within{border-color:var(--th-select);box-shadow:0 0 0 4px color-mix(in srgb,var(--th-select) 14%,transparent),var(--th-shadow)}
 .th-cmd-input{flex:1;min-width:0;border:0;outline:none;background:transparent;font:inherit;font-size:13.5px;color:var(--th-text)}
 .th-cmd-input::placeholder{color:var(--th-t4)}
-.th-cmd-chips{display:flex;gap:6px;flex-wrap:wrap}
+.th-cmd-chips{display:flex;gap:6px;flex-wrap:nowrap;overflow-x:auto;scrollbar-width:none;padding:2px 2px 0;-webkit-mask-image:linear-gradient(to right,#000 90%,transparent);mask-image:linear-gradient(to right,#000 90%,transparent)}.th-cmd-chips::-webkit-scrollbar{display:none}
+.th-cmd-chip{flex-shrink:0;white-space:nowrap;display:inline-flex;align-items:center;gap:5px}.th-cmd-chip svg{color:var(--th-hermes)}
+.th-composer{flex:none;width:100%;max-width:960px;margin:0 auto;box-sizing:border-box;padding:2px 22px 16px}
+.th-composer .th-cmd-box{padding:8px 8px 8px 12px;border-radius:18px;box-shadow:var(--th-lift)}
+.th-ovwrap{position:relative}
+.th-ovhandle{position:absolute;left:50%;bottom:-17px;transform:translateX(-50%);z-index:3;width:46px;height:18px;border-radius:999px;display:grid;place-items:center;background:var(--th-panel);border:1px solid var(--th-line2)!important;color:var(--th-t3);box-shadow:var(--th-shadow);transition:color .2s,transform .3s var(--th-spring)}
+.th-ovhandle:hover{color:var(--th-text);transform:translateX(-50%) translateY(-1px)}
+.th-ostoggle{width:28px;height:28px;border-radius:9px;flex-shrink:0}
 .th-cmd-chip{height:26px;padding:0 11px;border-radius:999px;border:1px solid var(--th-line)!important;font-size:12px;color:var(--th-t2);background:var(--th-panel)!important;transition:background .2s,color .2s}.th-cmd-chip:hover{color:var(--th-text);border-color:var(--th-line2)!important}
 
 
@@ -1236,7 +1244,6 @@ button.th-ost{padding:0;border-radius:8px}button.th-ost:hover b{text-decoration:
 .th-need-inline .th-nexttag{position:static}.th-need-inline .th-mini{width:22px!important;height:22px!important}
 .th-need-inline .th-need-tx span{display:none}.th-need-inline:hover .th-need-tx b{text-decoration:underline;text-decoration-color:var(--th-line2)}
 .th-omore{font-size:12px;white-space:nowrap}
-.th-ovtoggle{margin-left:auto;display:inline-flex;align-items:center;gap:5px;height:26px;padding:0 8px;border-radius:8px;font-size:12px;color:var(--th-t3);white-space:nowrap}.th-ovtoggle:hover{color:var(--th-text);background:var(--th-hover)}
 `
 
 /* ------------------------------------------------------------------ plugin */
