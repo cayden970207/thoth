@@ -48,7 +48,11 @@ class ThothPlugin:
     def __init__(self, ctx: Any):
         self.ctx = ctx
         self._tickets: dict[tuple[str, str], tuple[float, str]] = {}
-        self._run_sessions: dict[str, str] = {}
+        # Completion notices. Keys are (project root, run ref): run refs restart at R1 in every project.
+        self._run_sessions: dict[tuple[str, str], str] = {}   # runs a coordinator tool call started -> its session
+        self._waiting: dict[tuple[str, str], int] = {}        # runs an in-flight thoth_wait will report itself
+        self._held: dict[tuple[str, str], list[list[str]]] = {}  # (root, session) -> notices held for one batch
+        self._session_projects: dict[str, str] = {}           # session -> project it last used Thoth on
         self._lock = threading.Lock()
 
     # -- settings & project -----------------------------------------------------
@@ -118,6 +122,12 @@ class ThothPlugin:
     # -- approval ----------------------------------------------------------------
 
     def _approval_text(self, name: str, args: dict, svc: Thoth, project: str) -> tuple[str, str]:
+        if name == "thoth_init":
+            setup = " ".join(str(args.get("setup") or "").split())
+            where = str(Path(project).expanduser())
+            text = (f"Thoth: before an agent starts on a task in {where}, run `{setup}` in that task's folder. "
+                    "It runs as you, outside the agents' sandbox and with network access (to install dependencies).")
+            return text, f"thoth:setup:{_short_hash(where + setup)}"
         brain = svc.open(project)
         task = brain.task(parse_id(args.get("task"), "T"))
         if name == "thoth_merge":
@@ -177,10 +187,14 @@ class ThothPlugin:
                 return False
         return agent == "hermes"
 
+    @staticmethod
+    def _gated(name: str, args: dict) -> bool:
+        return name in GATED or (name == "thoth_init" and bool(str(args.get("setup") or "").strip()))
+
     def pre_tool_call(self, tool_name: str = "", args: dict | None = None, task_id: str = "", session_id: str = "", **_: Any) -> dict | None:
-        if tool_name not in GATED:
-            return None
         args = dict(args or {})
+        if not self._gated(tool_name, args):
+            return None
         svc = self.service()
         project = str(args.get("project") or "").strip() or self.default_project()
         if self._self_assign(tool_name, args, svc, project):
@@ -221,12 +235,19 @@ class ThothPlugin:
             project = str(args.get("project") or "").strip() or self.default_project()
             scope = str(kwargs.get("session_id") or kwargs.get("task_id") or "")
             try:
-                if name in GATED and not self._self_assign(name, args, svc, project) and not self._consume_ticket(name, args, scope):
+                if self._gated(name, args) and not self._self_assign(name, args, svc, project) and not self._consume_ticket(name, args, scope):
                     return json.dumps({"ok": False, "error": self._gate(name)})
-                result = call(svc, name, args, lambda: project)
+                if name == "thoth_wait":
+                    result = self._wait(svc, args, project)
+                else:
+                    result = call(svc, name, args, lambda: project)
                 self.remember(project)
-                if name in ("thoth_assign", "thoth_review") and result.get("run"):
-                    self._bind_run(result["run"])
+                root = find_brain_root(project) if project else None
+                if root is not None and scope:
+                    with self._lock:
+                        self._session_projects[scope] = _rootkey(root)
+                if name in ("thoth_assign", "thoth_review", "thoth_revise") and result.get("run") and root is not None:
+                    self._bind_run(_rootkey(root), result["run"])
                 if name == "thoth_coordinator":
                     result["how_to_continue"] = coordinator_howto(result["coordinator"], result["project"])
                 return json.dumps({"ok": True, **result}, ensure_ascii=False)
@@ -240,7 +261,7 @@ class ThothPlugin:
 
     # -- completion notices ------------------------------------------------------
 
-    def _bind_run(self, run_ref: str) -> None:
+    def _bind_run(self, root: str, run_ref: str) -> None:
         key = ""
         try:
             from gateway.session_context import get_session_env
@@ -249,29 +270,77 @@ class ThothPlugin:
         except Exception:
             pass
         with self._lock:
-            self._run_sessions[run_ref] = key
+            self._run_sessions[(root, run_ref)] = key
 
-    def _notify(self, project: str, run: dict) -> None:
-        if not self.settings().get("notify_on_complete", True):
-            return
-        time.sleep(0.5)  # let the tool call that started the run record its session first
+    def _wait(self, svc: Thoth, args: dict, project: str) -> dict:
+        """thoth_wait, remembering which runs it will report so no separate notice repeats them."""
+        brain = svc.open(project)
+        root = _rootkey(brain.root)
+        refs = [f"R{parse_id(r, 'R')}" for r in args.get("runs") or []] or [r["ref"] for r in brain.runs(open_only=True)]
+        keys = [(root, ref) for ref in refs]
         with self._lock:
-            session_key = self._run_sessions.pop(run["run"], "")
+            for k in keys:
+                self._waiting[k] = self._waiting.get(k, 0) + 1
+        try:
+            return call(svc, "thoth_wait", args, lambda: project)
+        finally:
+            with self._lock:
+                for k in keys:
+                    left = self._waiting.get(k, 0) - 1
+                    if left > 0:
+                        self._waiting[k] = left
+                    else:
+                        self._waiting.pop(k, None)
+
+    @staticmethod
+    def _notice(run: dict) -> list[str]:
         what = "review" if run["kind"] == "review" else "build"
-        lines = [f"[Thoth] {run['agent']} finished the {what} of {run['task']} \"{run['title']}\": {run['status']} → task is {run['task_status']}."]
+        lines = [f"{run['agent']} finished the {what} of {run['task']} \"{run['title']}\": {run['status']} → task is {run['task_status']}."]
         if run.get("verdict"):
             lines.append(f"Verdict: {run['verdict']}.")
         if run.get("summary"):
-            lines.append(f"Summary: {run['summary'][:600]}")
+            lines.append(f"Summary: {run['summary'][:400]}")
         if run.get("comments"):
-            lines.append("Review comments: " + " | ".join(run["comments"])[:800])
-        if run.get("diffstat"):
-            lines.append(f"Changes: {run['diffstat']} (commit {run.get('commit', '')}).")
+            lines.append("Review comments: " + " | ".join(run["comments"])[:600])
         if run.get("error"):
-            lines.append(f"Error: {run['error'][:400]}")
-        lines.append("Check thoth_status and decide the next step (review, fix, merge or the next task).")
+            lines.append(f"Error: {run['error'][:300]}")
+        return lines
+
+    def _notify(self, project: str, run: dict) -> None:
+        """Tell the coordinator's chat what finished, without waking it more than needed.
+
+        A notice only goes to runs a coordinator tool call started (the Thoth page shows its own),
+        never repeats what an in-flight thoth_wait reports, and waits for the session's other open
+        runs so several results arrive as one message (each message starts a whole model turn).
+        """
+        if not self.settings().get("notify_on_complete", True):
+            return
+        time.sleep(0.5)  # let the tool call that started the run record its session first
+        project = _rootkey(project)
+        key = (project, run["run"])
         try:
-            self.ctx.inject_message("\n".join(lines), role="user", session_key=session_key or None)
+            open_refs = {r["ref"] for r in Brain(project).runs(open_only=True)}
+        except Exception:
+            open_refs = set()
+        with self._lock:
+            if key not in self._run_sessions:
+                return
+            session_key = self._run_sessions.pop(key)
+            if self._waiting.get(key):
+                return
+            batch_key = (project, session_key)
+            self._held.setdefault(batch_key, []).append(self._notice(run))
+            if any(k[0] == project and k[1] in open_refs and s == session_key for k, s in self._run_sessions.items()):
+                return
+            batch = self._held.pop(batch_key, [])
+        if not batch:
+            return
+        head = "[Thoth] " + ("A run finished." if len(batch) == 1 else f"{len(batch)} runs finished.")
+        body = "\n".join(("- " if len(batch) > 1 else "") + " ".join(lines) for lines in batch)
+        tail = ("Decide the next step with the Thoth tools (review, fix, merge or the next task). "
+                "Do not build, test, browse or start servers yourself: assign a task, or use thoth_preview to show a page.")
+        try:
+            self.ctx.inject_message(f"{head}\n{body}\n{tail}", role="user", session_key=session_key or None)
         except Exception:
             logger.debug("thoth: inject_message failed", exc_info=True)
 
@@ -283,6 +352,10 @@ class ThothPlugin:
             return None
         here = self.session_dir()
         root = find_brain_root(here) if here else None
+        if root is None:
+            with self._lock:
+                known = self._session_projects.get(session_id or "")
+            root = find_brain_root(known) if known else None
         if root is None:
             return None
         try:
@@ -308,7 +381,9 @@ class ThothPlugin:
             needs = []
         if needs:
             lines.append("Waiting on the user or coordinator: " + "; ".join(f"{n['title']} ({n['tool']} {n['task']})" for n in needs[:4]))
-        lines.append("Use thoth_status for details. Record important decisions with thoth_note so Claude Code and Codex see them.")
+        lines.append("You coordinate: plan, assign, review, merge, and talk to the user. Claude Code and Codex do the work. "
+                     "Do not write code, run tests, start servers, open browsers or write outside the project yourself: assign a task "
+                     "(kind qa for checks) and use thoth_preview to show a page. Record decisions with thoth_note.")
         return {"context": "\n".join(lines)}
 
     # -- slash command -----------------------------------------------------------
@@ -367,6 +442,11 @@ def _fingerprint(name: str, args: dict) -> str:
     relevant = {k: args.get(k) for k in ("project", "task", "agent", "reviewer", "instructions", "override", "feedback", "files", "model", "effort")}
     blob = json.dumps([name, relevant], sort_keys=True, default=str)
     return hashlib.sha256(blob.encode()).hexdigest()
+
+
+def _rootkey(path: Any) -> str:
+    """One spelling per project folder (/tmp and /private/tmp are the same place)."""
+    return str(Path(path).expanduser().resolve())
 
 
 def _short_hash(text: str) -> str:

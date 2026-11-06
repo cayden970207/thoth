@@ -22,14 +22,19 @@ _EFFORT = {"type": "string", "enum": ["low", "medium", "high", "xhigh", "max", "
 
 TOOLS: dict[str, tuple[str, dict]] = {
     "thoth_init": (
-        "Start (or reopen) the Thoth shared brain for a git project so Claude Code, Codex and Hermes can work on it "
+        "Start (or reopen) the Thoth shared brain for a project so Claude Code, Codex and Hermes can work on it "
         "as one team. Creates .thoth/ in the repo (kept out of git) with the task board, decisions, notes and run history. "
-        "Call this once per project before planning.",
+        "Call this once per project before planning. For a new project pass create=true: Thoth makes the folder and its "
+        "git repository, so do not run git or mkdir yourself.",
         {
             "type": "object",
             "properties": {
                 "project": _PROJECT,
                 "goal": {"type": "string", "description": "What the team is building, in one or two sentences"},
+                "create": {"type": "boolean", "description": "Make the folder and a git repository if they do not exist yet"},
+                "setup": {"type": "string", "description": "Optional command Thoth runs in each new task worktree before an agent starts, "
+                          "outside the sandbox with network (e.g. `npm ci`, `uv sync`). Needs the user's approval. "
+                          "Without it Thoth links node_modules/.venv from the main checkout."},
             },
         },
     ),
@@ -210,6 +215,12 @@ TOOLS: dict[str, tuple[str, dict]] = {
         "Conflicts are aborted and reported.",
         {"type": "object", "properties": {"project": _PROJECT, "task": _TASK}, "required": ["task"]},
     ),
+    "thoth_preview": (
+        "Open what a task built (a web page, a browser game) or, without a task, the project with everything merged: "
+        "Thoth serves it read-only on localhost and returns the link to give the user. Use this instead of starting a "
+        "server, copying files or opening a browser yourself.",
+        {"type": "object", "properties": {"project": _PROJECT, "task": {"type": "string", "description": "Task id like T2; omit for the merged project"}}},
+    ),
     "thoth_models": (
         "List the models and reasoning efforts Claude Code and Codex can use here, to pick one per task "
         "(e.g. Fable for the hard part, Haiku for quick chores).",
@@ -250,4 +261,5 @@ EMOJI = {
     "thoth_restore": "⏪",
     "thoth_sync": "🔄",
     "thoth_models": "🧠",
+    "thoth_preview": "👀",
 }

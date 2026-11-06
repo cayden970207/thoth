@@ -34,6 +34,7 @@ provides_tools:
   - thoth_restore
   - thoth_sync
   - thoth_models
+  - thoth_preview
 
 provides_hooks:
   - pre_tool_call
@@ -114,6 +115,16 @@ config_schema:
     default: 600000
     label: Start fresh instead of resuming above this many tokens
     description: Resuming re-sends the agent's whole earlier session on every call. When that session already used more prompt tokens than this, Thoth starts a fresh session with the brief instead.
+  link_dependencies:
+    type: bool
+    default: true
+    label: Link node_modules and .venv into task worktrees
+    description: A task worktree is a clean checkout without ignored folders, and agents have no network to reinstall them. Thoth links them from the main checkout (agents can read but not change them). A project setup command, when set, replaces this.
+  copy_env_files:
+    type: bool
+    default: false
+    label: Copy ignored .env files into task worktrees
+    description: Lets agents run code that needs local settings or test keys. Only files git already ignores are copied, so they can never be committed.
   remove_worktree_on_merge:
     type: bool
     default: true

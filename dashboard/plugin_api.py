@@ -144,6 +144,10 @@ async def action(body: dict) -> dict[str, Any]:
             result = svc.plan(path, body.get("tasks") or [])
         elif kind == "note":
             result = svc.note(path, str(body.get("kind") or "context"), str(body.get("body") or ""), task=task)
+        elif kind == "preview":
+            result = svc.preview(path, task or None)
+        elif kind == "output":
+            result = svc.output_url(path, task or None, str(body.get("path") or ""))
         else:
             raise HTTPException(400, f"Unknown action {kind!r}")
     except HTTPException:
@@ -196,6 +200,49 @@ async def thumb(project: str = "", task: str = "", path: str = "", commit: str =
             raise HTTPException(413, "Image too large for a thumbnail")
         data = base64.b64encode(resolved.read_bytes()).decode("ascii")
         return {"path": path, "mime": mime, "data": f"data:{mime};base64,{data}"}
+    raise HTTPException(404, "File not found")
+
+
+
+_MEDIA_TYPES = {**_IMAGE_TYPES, ".mp4": "video/mp4", ".m4v": "video/mp4", ".webm": "video/webm", ".mov": "video/quicktime", ".ogv": "video/ogg",
+                ".mp3": "audio/mpeg", ".wav": "audio/wav", ".ogg": "audio/ogg", ".oga": "audio/ogg", ".m4a": "audio/mp4", ".flac": "audio/flac", ".aac": "audio/aac"}
+_TEXT_SUFFIXES = {".md", ".markdown", ".txt", ".json", ".csv", ".tsv", ".yaml", ".yml", ".log"}
+_MAX_MEDIA_BYTES = 40_000_000
+_MAX_TEXT_BYTES = 300_000
+
+
+@router.get("/media")
+async def media(project: str = "", task: str = "", path: str = "") -> dict[str, Any]:
+    """A file an agent produced, to view in the page: video, sound and images as a data URL
+    (the page's frames cannot load localhost), documents as text. Files inside the project only."""
+    import base64
+
+    root = Path(_project(project))
+    rel = Path(path)
+    if not path or rel.is_absolute() or ".." in rel.parts or any(p.startswith(".") for p in rel.parts):
+        raise HTTPException(400, "Give a path inside the project")
+    suffix = rel.suffix.lower()
+    candidates = []
+    if task:
+        candidates.append(root / ".thoth" / "worktrees" / task.upper() / rel)
+    candidates.append(root / rel)
+    for file in candidates:
+        try:
+            resolved = file.resolve()
+        except OSError:
+            continue
+        if not str(resolved).startswith(str(root.resolve()) + "/") or not resolved.is_file():
+            continue
+        size = resolved.stat().st_size
+        if suffix in _TEXT_SUFFIXES:
+            raw = resolved.read_bytes()[:_MAX_TEXT_BYTES]
+            return {"path": path, "kind": "text", "bytes": size, "truncated": size > _MAX_TEXT_BYTES, "text": raw.decode("utf-8", "replace")}
+        mime = _MEDIA_TYPES.get(suffix)
+        if mime is None:
+            raise HTTPException(415, "Open this file in your browser")
+        if size > _MAX_MEDIA_BYTES:
+            raise HTTPException(413, f"{size // 1_000_000} MB is too large to play here. Open it in your browser.")
+        return {"path": path, "kind": "media", "mime": mime, "bytes": size, "data": f"data:{mime};base64,{base64.b64encode(resolved.read_bytes()).decode('ascii')}"}
     raise HTTPException(404, "File not found")
 
 

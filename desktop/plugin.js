@@ -77,12 +77,42 @@ function announce (snap) {
     }
   }
 }
+// The project list is re-read every few seconds, so a project Hermes starts in a chat shows up here
+// (with a banner offering to open it) without restarting the app.
+let projectsAt = 0
+async function loadProjects (force = false) {
+  if (!force && Date.now() - projectsAt < 8000) return
+  projectsAt = Date.now()
+  const list = (await ctxRef.rest('/projects')).projects || []
+  // A backend that is still starting can answer with no projects: keep the ones we know.
+  if (!list.length && store.projects.length) return
+  if (!list.length) {
+    let saved = ''
+    try { saved = ctxRef.storage && ctxRef.storage.get ? await ctxRef.storage.get('project') : '' } catch (e) {}
+    store.reconnecting = !!saved
+  } else store.reconnecting = false
+  if (store.projects.length) {
+    const known = new Set(store.projects.map(p => p.path))
+    const fresh = list.find(p => !known.has(p.path))
+    if (fresh && fresh.path !== store.project) store.newProject = fresh
+  }
+  store.projects = list
+  // The open project was removed from the registry: fall back to the most recent one.
+  if (store.project && list.length && !list.some(p => p.path === store.project)) { store.project = list[0].path; store.snap = null }
+}
+function switchProject (path) {
+  store.newProject = null
+  if (path === store.project) { emit(); return }
+  store.project = path; store.snap = null
+  try { ctxRef.storage.set('project', path) } catch (err) {}
+  emit(); refresh()
+}
 async function refresh () {
   if (!ctxRef) return
   try {
-    if (!store.projects.length || !store.project) {
-      const res = await ctxRef.rest('/projects')
-      store.projects = res.projects || []
+    const first = !store.projects.length || !store.project
+    await loadProjects(first)
+    if (first) {
       const saved = ctxRef.storage && ctxRef.storage.get ? await ctxRef.storage.get('project') : ''
       store.project = (store.projects.find(p => p.path === saved) || store.projects[0] || {}).path || ''
     }
@@ -107,6 +137,83 @@ async function act (body, done) {
   }
   await refresh()
   return res
+}
+// What an agent is doing, in words (the raw line stays in the tooltip).
+function humanize (p) {
+  if (!p) return 'starting'
+  const base = s => String(s).trim().split(/[\\/]/).pop()
+  let m
+  if ((m = p.match(/^(?:Read|NotebookRead):\s*(.+)/))) return 'reading ' + base(m[1])
+  if ((m = p.match(/^Write:\s*(.+)/))) return 'writing ' + base(m[1])
+  if ((m = p.match(/^(?:Edit|MultiEdit|NotebookEdit):\s*(.+)/))) return 'editing ' + base(m[1])
+  if ((m = p.match(/^edited (.+)/))) return 'editing ' + m[1]
+  if (/^(?:Grep|Glob|LS):/.test(p)) return 'searching the code'
+  if (/^(?:WebFetch|WebSearch):/.test(p)) return 'looking something up'
+  if (/^TodoWrite/.test(p)) return 'planning its steps'
+  if ((m = p.match(/^thoth\.thoth_(\w+)/))) return { note: 'recording a decision for the team', status: 'checking the team board', context: 'reading a task brief' }[m[1]] || 'using Thoth'
+  if ((m = p.match(/^(?:Bash:\s*|\$\s*)(.+)/))) {
+    const c = m[1]
+    if (/\b(pytest|unittest|jest|vitest|mocha|go test|cargo test|npm (run )?test)\b/.test(c)) return 'running the tests'
+    if (/\b(npm|pnpm|yarn|pip|uv|bun) (install|ci|add|sync)\b/.test(c)) return 'installing packages'
+    if (/\b(magick|convert|rsvg-convert|sips|ffmpeg|cwebp)\b/.test(c)) return 'processing media'
+    if (/^\s*git\b/.test(c)) return 'checking versions'
+    if (/^\s*(ls|cat|sed|head|tail|grep|rg|find|wc|nl|tree|stat|file)\b/.test(c)) return 'looking through files'
+    if (/\b(node|python3?|deno|bun|ruby)\b/.test(c)) return 'running a script'
+    return 'running a command'
+  }
+  return p
+}
+// Who has a task's newest work (computed by Thoth from git history and the briefs it wrote).
+const reachOf = (snap, ref) => (snap.reach || {})[ref] || []
+function behindOf (snap, d, t) {
+  // Tasks this one builds on that have newer versions than the one it was built on.
+  return t.depends_on.map(id => d.byTask[id]).filter(Boolean).flatMap(dep => reachOf(snap, dep.ref)
+    .filter(e => e.task === t.ref && e.state === 'behind').map(e => ({ dep: dep.ref, gap: e.latest - e.have, ...e })))
+}
+function reachWords (e, from) {
+  const who = AGENTS[e.agent] ? AGENTS[e.agent].name : e.agent
+  if (e.state === 'behind') return `${who}'s ${e.task} is built on v${e.have} of ${e.latest} of ${from}. Update ${e.task} to pass on the newest.`
+  if (e.state === 'waiting') return `${who}'s ${e.task} has not started. It will start from the newest version of ${from}.`
+  if (e.state === 'notyet') return `${who} has not run since ${from} recorded: “${e.note}”`
+  return e.task ? `${who}'s ${e.task} is built on the newest version of ${from}.` : `${who} has read ${from}'s decisions.`
+}
+function ReachAv ({ e, from, size = 18 }) {
+  return h('span', { className: 'th-rav r-' + e.state, title: reachWords(e, from) }, h(Mini, { agent: e.agent, size }),
+    e.state === 'ok' ? h('i', { className: 'th-rb th-rb-ok' }, '✓') : e.state === 'behind' ? h('i', { className: 'th-rb th-rb-behind' }, 'v' + e.have) : e.state === 'notyet' ? h('i', { className: 'th-rb th-rb-notyet' }, '!') : null)
+}
+// An agent's avatar, with a pulsing ring in its color while it works on this task.
+function Presence ({ agent, live }) {
+  const on = live && live.agent === agent
+  return h('span', { className: on ? 'th-presence' : '', style: on ? { '--c': AGENTS[agent].color } : undefined, title: on ? AGENTS[agent].name + ' is ' + (live.kind === 'review' ? 'reviewing' : 'working') + ' · ' + humanize(live.progress) : AGENTS[agent].name }, h(Mini, { agent }))
+}
+const OUT_KINDS = [['image', /\.(png|jpe?g|gif|webp|svg|bmp|avif)$/i], ['video', /\.(mp4|webm|mov|m4v|ogv)$/i], ['audio', /\.(mp3|wav|ogg|oga|m4a|flac|aac)$/i],
+  ['page', /\.html?$/i], ['pdf', /\.pdf$/i], ['text', /\.(md|markdown|txt|json|csv|tsv|ya?ml|log)$/i]]
+const outKind = path => (OUT_KINDS.find(([, re]) => re.test(path)) || ['file'])[0]
+const OUT_ICON = { image: 'image', video: 'film', audio: 'music', page: 'globe', pdf: 'doc', text: 'doc', file: 'file' }
+const OUT_LABEL = { image: 'Image', video: 'Video', audio: 'Sound', page: 'Web page', pdf: 'PDF', text: 'Document', file: 'File' }
+const MEDIA = new Set(['image', 'video', 'audio', 'page', 'pdf'])
+// Everything a task made that a person would want to look at: declared outputs, plus media and pages it wrote.
+const outputsOf = tk => [...new Set([...tk.outputs, ...tk.changed.filter(c => c.status !== 'D').map(c => c.path)])]
+  .filter(path => MEDIA.has(outKind(path)) || (tk.outputs.includes(path) && outKind(path) === 'text'))
+function openOutput (task, path) { store.viewer = { task, path, kind: outKind(path) }; emit() }
+const PAGE = /\.html?$/i
+const hasPage = tk => [...tk.changed.map(c => c.path), ...tk.outputs].some(p => PAGE.test(p))
+async function openPreview (task) {
+  try {
+    const r = await ctxRef.rest('/action', { method: 'POST', body: { project: store.project, action: 'preview', task: task || '' } })
+    let opened = false
+    try { opened = ctxRef.os && ctxRef.os.openExternal ? await ctxRef.os.openExternal(r.url) : false } catch (e) {}
+    if (!opened) opened = !!window.open(r.url, '_blank')
+    if (!opened && await copyText(r.url)) host.notify({ kind: 'info', message: 'Preview link copied — paste it into your browser', detail: r.url })
+    else host.notify({ kind: 'success', message: 'Opened ' + r.what + ' in your browser' })
+  } catch (err) {
+    host.notify({ kind: 'warning', message: (err && err.message) || 'Nothing to preview yet' })
+  }
+}
+async function showFiles (path) {
+  let ok = false
+  try { ok = ctxRef.os && ctxRef.os.revealPath ? await ctxRef.os.revealPath(path) : false } catch (e) {}
+  if (!ok && await copyText(path)) host.notify({ kind: 'info', message: 'Folder path copied', detail: path })
 }
 // A button that shows a spinner and ignores clicks while the promise its onClick returns is pending.
 function Btn ({ onClick, primary = false, sm = false, ghost = false, className = '', title, disabled = false, children }) {
@@ -151,7 +258,15 @@ const ICONS = {
   eye: 'M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12zM12 10a2 2 0 1 0 0 4 2 2 0 0 0 0-4z',
   undo: 'M9 14L4 9l5-5M4 9h10.5a5.5 5.5 0 0 1 0 11H11',
   keys: 'M3 6.5h18v11H3zM7 10.5h.01M11 10.5h.01M15 10.5h.01M8 14h8',
-  alert: 'M12 4l9 16H3zM12 10v4M12 17h.01'
+  alert: 'M12 4l9 16H3zM12 10v4M12 17h.01',
+  play: 'M8 5.5v13l10.5-6.5z',
+  arrowr: 'M5 12h14M13 6l6 6-6 6',
+  film: 'M4 5h16v14H4zM4 9h16M4 15h16M8 5v4M8 15v4M16 5v4M16 15v4',
+  music: 'M9 17V5l10-2v12M9 17a2.5 2.5 0 1 1-5 0 2.5 2.5 0 0 1 5 0zM19 15a2.5 2.5 0 1 1-5 0 2.5 2.5 0 0 1 5 0z',
+  globe: 'M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18zM3 12h18M12 3c2.5 2.6 3.8 5.6 3.8 9s-1.3 6.4-3.8 9c-2.5-2.6-3.8-5.6-3.8-9S9.5 5.6 12 3z',
+  grid: 'M4 4h7v7H4zM13 4h7v7h-7zM4 13h7v7H4zM13 13h7v7h-7z',
+  external: 'M14 4h6v6M20 4l-9 9M18 14v5H5V6h5',
+  folder: 'M3.5 6.5h6l2 2h9v10h-17z'
 }
 function Icon ({ name, size = 16, fill = false, style }) {
   return h('svg', { width: size, height: size, viewBox: '0 0 24 24', fill: fill ? 'currentColor' : 'none', stroke: fill ? 'none' : 'currentColor', strokeWidth: 1.8, strokeLinecap: 'round', strokeLinejoin: 'round', style, 'aria-hidden': true }, h('path', { d: ICONS[name] }))
@@ -218,19 +333,25 @@ function derive (snap) {
   return { byTask, depth }
 }
 
+const ROWS_MAX = 3
 function layout (tasks, depth, overrides) {
+  // Tasks at the same depth share a column; more than ROWS_MAX wrap into extra columns,
+  // so a long project grows sideways in tidy rows instead of into one very tall column.
   const cols = {}
-  for (const t of tasks) (cols[depth[t.id]] = cols[depth[t.id]] || []).push(t)
-  const maxDepth = Math.max(0, ...Object.keys(cols).map(Number))
-  const tallest = Math.max(1, ...Object.values(cols).map(c => c.length))
+  for (const t of tasks) { const k = depth[t.id] || 0; (cols[k] = cols[k] || []).push(t) }
+  const keys = Object.keys(cols).map(Number).sort((a, b) => a - b)
+  const rowsOf = n => Math.min(n, ROWS_MAX)
+  const tallest = Math.max(1, ...Object.values(cols).map(c => rowsOf(c.length)))
   const height = tallest * ROW_Y + 40
   const pos = {}
-  for (const [d, list] of Object.entries(cols)) {
-    const top = (height - list.length * ROW_Y) / 2 + 20
-    list.forEach((t, i) => { pos[t.ref] = [COL_X + Number(d) * COL_GAP, top + i * ROW_Y] })
+  let x = COL_X
+  for (const k of keys) {
+    const list = cols[k], rows = rowsOf(list.length), top = (height - rows * ROW_Y) / 2 + 20
+    list.forEach((t, i) => { pos[t.ref] = [x + Math.floor(i / rows) * COL_GAP, top + (i % rows) * ROW_Y] })
+    x += Math.ceil(list.length / rows) * COL_GAP
   }
   pos.G = [20, height / 2 - NODE_H / 2]
-  pos.M = [COL_X + (maxDepth + 1) * COL_GAP, height / 2 - NODE_H / 2]
+  pos.M = [x, height / 2 - NODE_H / 2]
   for (const [k, v] of Object.entries(overrides || {})) if (pos[k]) pos[k] = v
   return { pos, width: pos.M[0] + NODE_W + 40, height: Math.max(height, 420) }
 }
@@ -343,9 +464,36 @@ function Canvas ({ snap, d, selected, select, project }) {
   const [zoom, setZoom] = useState(1)
   const [auto, setAuto] = useState(true)
   const [over, setOver] = useState({})
-  const tasks = snap.tasks || []
-  const { pos, width, height } = useMemo(() => layout(tasks, d.depth, over), [snap, over])
-  useEffect(() => { setOver({}) }, [project])
+  const [showShipped, setShowShipped] = useState(false)
+  const [pan, setPan] = useState({ x: 0, y: 0 })
+  const all = snap.tasks || []
+  // Shipped (merged) and cancelled work folds into the Main card, so the canvas only shows what is moving.
+  const shipped = all.filter(t => t.status === 'merged' || t.status === 'cancelled')
+  const folding = shipped.length > 2 && !showShipped
+  const tasks = folding ? all.filter(t => t.status !== 'merged' && t.status !== 'cancelled') : all
+  const shown = new Set(tasks.map(t => t.id))
+  const depsOf = t => t.depends_on.filter(id => shown.has(id))
+  const depth = useMemo(() => {
+    const out = {}
+    const get = id => { if (out[id] != null) return out[id]; out[id] = 0; const tt = d.byTask[id]; const ds = tt ? tt.depends_on.filter(x => shown.has(x)) : []; out[id] = ds.length ? 1 + Math.max(...ds.map(get)) : 0; return out[id] }
+    tasks.forEach(tt => get(tt.id))
+    return out
+  }, [snap, folding])
+  const { pos, width, height } = useMemo(() => layout(tasks, depth, over), [snap, over, folding])
+  useEffect(() => { setOver({}); setPan({ x: 0, y: 0 }) }, [project])
+  useEffect(() => {
+    const el = surface.current
+    if (!el) return
+    // Two-finger scroll pans, pinch (or ⌘/Ctrl + scroll) zooms.
+    const wheel = e => {
+      e.preventDefault()
+      setAuto(false)
+      if (e.ctrlKey || e.metaKey) setZoom(z => Math.max(0.3, Math.min(1.8, z * Math.exp(-e.deltaY * 0.01))))
+      else setPan(p => ({ x: p.x - e.deltaX, y: p.y - e.deltaY }))
+    }
+    el.addEventListener('wheel', wheel, { passive: false })
+    return () => el.removeEventListener('wheel', wheel)
+  }, [])
   useLayoutEffect(() => {
     if (!auto || !surface.current) return
     const fit = () => { const el = surface.current; if (el) setZoom(Math.max(0.45, Math.min(1.1, (el.clientWidth - 40) / width, (el.clientHeight - 110) / height))) }
@@ -356,12 +504,13 @@ function Canvas ({ snap, d, selected, select, project }) {
   const edges = []
   const anchor = (id, side) => { const [x, y] = pos[id]; return side === 'r' ? [x + NODE_W, y + NODE_H / 2] : [x, y + NODE_H / 2] }
   const hasChild = new Set()
-  for (const t of tasks) for (const dep of t.depends_on) hasChild.add(dep)
+  for (const t of tasks) for (const dep of depsOf(t)) hasChild.add(dep)
   for (const t of tasks) {
     const tk = d.byTask[t.id]
     const live = !!tk.open
     const color = live ? AGENTS[tk.open.agent].color : ''
-    const srcs = t.depends_on.length ? t.depends_on.map(id => d.byTask[id].ref) : ['G']
+    const deps = depsOf(t)
+    const srcs = deps.length ? deps.map(id => d.byTask[id].ref) : ['G']
     for (const s of srcs) {
       const [x1, y1] = anchor(s, 'r'), [x2, y2] = anchor(t.ref, 'l')
       const src = s === 'G' ? null : tasks.find(x => x.ref === s)
@@ -378,22 +527,35 @@ function Canvas ({ snap, d, selected, select, project }) {
     const up = () => { removeEventListener('pointermove', move); removeEventListener('pointerup', up); if (moved) e.target.closest('.th-node').dataset.moved = '1' }
     addEventListener('pointermove', move); addEventListener('pointerup', up)
   }
+  const startPan = e => {
+    if (e.button !== 0 || e.target.closest('.th-node,.th-zoom,.th-sat,.th-cursor,button')) return
+    const sx = e.clientX, sy = e.clientY, base = pan
+    let moving = false
+    const move = ev => {
+      const dx = ev.clientX - sx, dy = ev.clientY - sy
+      if (!moving && Math.abs(dx) + Math.abs(dy) < 4) return
+      if (!moving) { moving = true; setAuto(false); if (surface.current) surface.current.classList.add('th-panning') }
+      setPan({ x: base.x + dx, y: base.y + dy })
+    }
+    const up = () => { removeEventListener('pointermove', move); removeEventListener('pointerup', up); if (surface.current) surface.current.classList.remove('th-panning') }
+    addEventListener('pointermove', move); addEventListener('pointerup', up)
+  }
   const agents = snap.agents || {}
   const cursors = Object.entries(agents).filter(([, a]) => a.busy && a.task && pos[a.task])
   const ox = surface.current ? Math.max(10, (surface.current.clientWidth - width * zoom) / 2) : 10
   const node = (id, content, extra = {}) => h('div', {
-    key: id, className: 'th-node' + (selected === id ? ' th-sel' : '') + (extra.working ? ' th-working' : '') + (extra.attention ? ' th-attn' : '') + (flashing(id) ? ' th-flash' : ''), style: { left: pos[id][0], top: pos[id][1] },
+    key: id, className: 'th-node' + (selected === id ? ' th-sel' : '') + (extra.working ? ' th-working' : '') + (extra.attention ? ' th-attn' : '') + (extra.stack ? ' th-stack' : '') + (flashing(id) ? ' th-flash' : ''), style: { left: pos[id][0], top: pos[id][1] },
     onPointerDown: drag(id), onClick: e => { const n = e.currentTarget; if (n.dataset.moved) { delete n.dataset.moved; return } if (id !== 'G' && id !== 'M') select(id) }
   }, content)
   const goal = snap.meta.goal || 'Shared goal'
-  return h('div', { className: 'th-view th-canvas', ref: surface },
-    h('div', { className: 'th-world', style: { width, height, transform: `translate(${ox}px, 22px) scale(${zoom})` } },
+  return h('div', { className: 'th-view th-canvas', ref: surface, onPointerDown: startPan },
+    h('div', { className: 'th-world', style: { width, height, transform: `translate(${ox + pan.x}px, ${22 + pan.y}px) scale(${zoom})` } },
       h('svg', { className: 'th-edges', width, height }, edges.map(e => h('path', { key: e.k, d: e.d, className: 'th-edge ' + e.cls, style: e.color ? { stroke: e.color } : undefined }))),
       edges.filter(e => e.label).map(e => h('span', { key: 'l' + e.k, className: 'th-elabel', style: { left: e.lx, top: e.ly } }, e.label)),
       node('G', [
         h('div', { key: 'h', className: 'th-node-hd' }, h('span', { className: 'th-type th-hermes' }, h(Icon, { name: 'plan', size: 13 }), 'Plan')),
         h('div', { key: 't', className: 'th-node-ttl' }, goal.length > 70 ? goal.slice(0, 68) + '…' : goal),
-        h('div', { key: 'm', className: 'th-meta' }, h('span', { className: 'th-tag' }, plural(tasks.length, 'task')), h('span', { className: 'th-tag' }, plural((snap.notes || []).filter(n => n.kind === 'decision').length, 'decision'))),
+        h('div', { key: 'm', className: 'th-meta' }, h('span', { className: 'th-tag' }, plural(all.length, 'task')), h('span', { className: 'th-tag' }, plural((snap.notes || []).filter(n => n.kind === 'decision').length, 'decision'))),
         h('div', { key: 'f', className: 'th-node-ft' }, h(Mini, { agent: snap.meta.coordinator || 'hermes' }), h('span', { className: 'th-muted' }, 'coordinator'))
       ]),
       tasks.map(t => {
@@ -402,7 +564,7 @@ function Canvas ({ snap, d, selected, select, project }) {
         const label = t.role || KIND_LABEL[kind]
         return node(t.ref, [
           h('div', { key: 'h', className: 'th-node-hd' }, h('span', { className: 'th-type th-' + agent, title: KIND_LABEL[kind] + (t.role ? ' · ' + t.role : '') }, h(Icon, { name: KIND_ICON[kind] || 'build', size: 13 }), label.length > 22 ? label.slice(0, 21) + '…' : label), h('span', { className: 'th-mono th-muted' }, t.ref),
-            tk.stale ? h('span', { className: 'th-stale', title: 'An earlier task has a newer version' }, h(Icon, { name: 'sync', size: 11 }), 'update') : null),
+            null),
           h('div', { key: 't', className: 'th-node-ttl' }, t.title),
           h('div', { key: 'm', className: 'th-meta' },
             tk.images.slice(0, 3).map(p => h(Thumb, { key: p, task: t.ref, path: p, size: 22 })),
@@ -411,7 +573,17 @@ function Canvas ({ snap, d, selected, select, project }) {
             t.model ? h('span', { className: 'th-tag th-modeltag', title: 'Model' + (t.effort ? ' · ' + t.effort + ' effort' : '') }, h(Icon, { name: 'spark', size: 10 }), ' ' + modelLabel(agent, t.model).replace(/ \d.*$/, '')) : null,
             t.head_commit && t.head_commit !== t.base_commit && !tk.images.length ? h('span', { className: 'th-tag' }, short(t.head_commit)) : null,
             !t.branch ? h('span', { className: 'th-tag' }, 'not started') : null),
-          h('div', { key: 'f', className: 'th-node-ft' }, h('span', { style: { display: 'flex' } }, h(Mini, { agent }), t.status !== 'todo' ? h(Mini, { agent: tk.reviewer }) : null), h(StatusPill, { status: t.status })),
+          h('div', { key: 'f', className: 'th-node-ft' }, h('span', { style: { display: 'flex' } }, h(Presence, { agent, live: tk.open }), t.status !== 'todo' ? h(Presence, { agent: tk.reviewer, live: tk.open }) : null),
+            reachOf(snap, t.ref).length ? h('span', { className: 'th-reach', title: 'Who has this task’s newest work' }, h(Icon, { name: 'arrowr', size: 11 }), reachOf(snap, t.ref).map(e => h(ReachAv, { key: e.agent, e, from: t.ref }))) : null,
+            h(StatusPill, { status: t.status })),
+          (() => {
+            const behind = behindOf(snap, d, t)
+            if (!behind.length || tk.open) return null
+            const gap = behind.reduce((n, b) => n + b.gap, 0)
+            return h('button', { key: 'bh', className: 'th-behind', title: behind.map(b => `${b.dep} has v${b.latest}; ${t.ref} is built on v${b.have}`).join('\n') + '\nClick to bring in the newest',
+              onClick: e => { e.stopPropagation(); act({ action: 'sync', task: t.ref }, r => r.updated && r.updated.length ? `${t.ref} now uses the newest ${r.updated.join(', ')}` : r.message) } },
+            h(Icon, { name: 'sync', size: 11 }), `${gap} change${gap > 1 ? 's' : ''} behind · Update`)
+          })(),
           tk.open ? h(Elapsed, { key: 'el', since: tk.open.started_at || tk.open.created_at, className: 'th-elapsed' }) : null,
           h('div', { key: 'b', className: 'th-bar' }, h('span', { style: { background: tk.open ? AGENTS[tk.open.agent].color : 'transparent' } }))
         ], { working: !!tk.open, attention: ((snap.needs || [])[0] || {}).task === t.ref })
@@ -419,10 +591,12 @@ function Canvas ({ snap, d, selected, select, project }) {
       node('M', [
         h('div', { key: 'h', className: 'th-node-hd' }, h('span', { className: 'th-type th-plain' }, h(Icon, { name: 'merge', size: 13 }), 'Main')),
         h('div', { key: 't', className: 'th-node-ttl' }, 'Merge into ' + (snap.meta.base_branch || 'main')),
-        h('div', { key: 'm', className: 'th-meta' }, h('span', { className: 'th-tag' }, tasks.filter(t => t.status === 'merged').length + ' merged')),
+        h('div', { key: 'm', className: 'th-meta' }, h('span', { className: 'th-tag' }, all.filter(t => t.status === 'merged').length + ' merged'),
+          shipped.length > 2 ? h('button', { className: 'th-tag th-tagbtn', title: folding ? 'Show the shipped tasks on the canvas' : 'Fold shipped tasks back into Main', onClick: e => { e.stopPropagation(); setShowShipped(v => !v); setAuto(true); setPan({ x: 0, y: 0 }) } }, folding ? 'Show ' + shipped.length : 'Fold') : null,
+          all.some(t => t.status === 'merged' && hasPage(d.byTask[t.id])) ? h('button', { className: 'th-tag th-tagbtn', title: 'Open everything merged so far in your browser', onClick: e => { e.stopPropagation(); openPreview('') } }, h(Icon, { name: 'play', size: 10 }), ' Open') : null),
         h('div', { key: 'f', className: 'th-node-ft' }, h('span', { className: 'th-muted' }, 'Needs your approval'),
           (() => { const ready = tasks.filter(t => t.status === 'approved').length; return h('span', { className: 'th-status th-s-' + (ready ? 'ok' : 'todo') }, ready ? ready + ' ready' : 'Waiting') })())
-      ]),
+      ], { stack: folding }),
       tasks.flatMap(t => {
         const dl = d.byTask[t.id].delegations
         if (!dl.length || !pos[t.ref]) return []
@@ -439,17 +613,18 @@ function Canvas ({ snap, d, selected, select, project }) {
         return h('div', { key: 'c' + k, className: 'th-cursor', style: { transform: `translate(${x + NODE_W - 46 + i * 16}px, ${y + NODE_H - 24 + i * 22}px)` } },
           h('svg', { width: 20, height: 20, viewBox: '0 0 24 24', style: { color: AGENTS[k].color } }, h('path', { d: 'M4 2.5l15 8.2-6.6 1.6-3.4 6.2z', fill: 'currentColor', stroke: '#fff', strokeWidth: 1.6, strokeLinejoin: 'round' })),
           h('div', { className: 'th-cursor-tag', style: { background: AGENTS[k].color } }, h('b', { className: 'th-mini-' + k }, h(Logo, { agent: k, size: 18 })), AGENTS[k].name),
-          a.say ? h('span', { className: 'th-cursor-say' }, a.say) : null)
+          a.say ? h('span', { className: 'th-cursor-say', title: a.say }, humanize(a.say)) : null)
       })),
     h('div', { className: 'th-zoom' },
       h('button', { onClick: () => { setAuto(false); setZoom(z => Math.max(0.4, z - 0.1)) }, 'aria-label': 'Zoom out' }, '−'),
       h('span', null, Math.round(zoom * 100) + '%'),
       h('button', { onClick: () => { setAuto(false); setZoom(z => Math.min(1.6, z + 0.1)) }, 'aria-label': 'Zoom in' }, '+'),
-      h('button', { onClick: () => { setAuto(true); setOver({}) }, 'aria-label': 'Fit and tidy', title: 'Fit and tidy' }, h(Icon, { name: 'fit', size: 14 }))))
+      h('button', { onClick: () => { setAuto(true); setOver({}); setPan({ x: 0, y: 0 }) }, 'aria-label': 'Fit and tidy', title: 'Fit and tidy' }, h(Icon, { name: 'fit', size: 14 }))))
 }
 
 function Board ({ snap, d, selected, select, askMerge }) {
   const [over, setOver] = useState('')
+  const [allDone, setAllDone] = useState(false)
   const tasks = snap.tasks || []
   const drop = col => e => {
     e.preventDefault(); setOver('')
@@ -463,12 +638,15 @@ function Board ({ snap, d, selected, select, askMerge }) {
   }
   return h('div', { className: 'th-view th-boardwrap' },
     h('div', { className: 'th-board' }, COLUMNS.map(([key, label, sw]) => {
-      const list = tasks.filter(t => COLUMN_OF[t.status] === key)
+      const full = tasks.filter(t => COLUMN_OF[t.status] === key)
+      // Done keeps the five most recent; older shipped work stays one click away.
+      const list = key === 'done' && !allDone ? [...full].sort((a, b) => b.id - a.id).slice(0, 5) : full
       return h('div', { key, className: 'th-col' },
-        h('h4', null, h('span', { className: 'th-sw', style: { background: sw } }), label, h('span', { className: 'th-n' }, list.length)),
+        h('h4', null, h('span', { className: 'th-sw', style: { background: sw } }), label, h('span', { className: 'th-n' }, full.length)),
         h('div', { className: 'th-lane' + (over === key ? ' th-over' : ''), onDragOver: e => { e.preventDefault(); setOver(key) }, onDragLeave: () => setOver(''), onDrop: drop(key) },
           list.length ? list.map(t => h(TaskCard, { key: t.id, t, tk: d.byTask[t.id], sel: selected === t.ref, select }))
-            : h('div', { className: 'th-empty' }, { todo: 'Nothing planned', build: 'Nothing building', review: 'Drop here to ask for a review', done: 'Drop an approved task to merge' }[key])))
+            : h('div', { className: 'th-empty' }, { todo: 'Nothing planned', build: 'Nothing building', review: 'Drop here to ask for a review', done: 'Drop an approved task to merge' }[key]),
+          key === 'done' && full.length > 5 ? h('button', { className: 'th-linkbtn th-older', onClick: () => setAllDone(v => !v) }, allDone ? 'Show only the latest 5' : `Show ${full.length - 5} older`) : null))
     })))
 }
 
@@ -484,7 +662,7 @@ function TaskCard ({ t, tk, sel, select }) {
       h('span', { className: 'th-tag', title: tk.produced.join('\n') }, h(Icon, { name: 'file', size: 11 }), ' ' + tk.produced.length + ' produced')) : null,
     tk.delegations.length ? h('div', { className: 'th-dele-row' }, h(Icon, { name: 'branchout', size: 13 }), tk.delegations.slice(-3).map((x, i) => h('span', { key: i, className: 'th-dele-chip th-sat-' + x.status, title: (x.role || '') + ': ' + (x.title || '') }, h('i', null), subLabel(x)))) : null,
     h('span', { className: 'th-prog' }, h(Icon, { name: 'ring', size: 15 }), h('span', { className: 'th-lbl' }, label), h('span', { className: 'th-track' }, h('span', { style: { width: pct + '%' } })), pct + '%'),
-    tk.open ? h('div', { className: 'th-live' }, AGENTS[tk.open.agent].name + ': ' + (tk.open.progress || 'starting')) : null,
+    tk.open ? h('div', { className: 'th-live', title: tk.open.progress || '' }, AGENTS[tk.open.agent].name + ': ' + humanize(tk.open.progress)) : null,
     total ? h('div', { className: 'th-tree' }, tk.issues.slice(0, 3).map((i, n) => h('div', { key: n, className: 'th-it' + (i.done ? ' th-done' : '') }, h(Check, { done: i.done }), h('span', null, i.text.length > 70 ? i.text.slice(0, 68) + '…' : i.text)))) : null,
     h('div', { className: 'th-props' },
       h('span', { className: 'th-k' }, h(Icon, { name: 'flag', size: 14 }), 'Status'), h('span', null, h(StatusPill, { status: t.status })),
@@ -573,7 +751,10 @@ function Inspector ({ snap, d, selected, tab, setTab, close }) {
   return h('div', { className: 'th-pane' },
     h('div', { className: 'th-ihead' }, h('span', { className: 'th-ico th-' + agent, style: { width: 40, height: 40 } }, h(Icon, { name: KIND_ICON[t.kind || 'code'] || 'build', size: 19 })),
       h('div', { style: { minWidth: 0 } }, h('div', { className: 'th-mono th-muted', style: { whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' } }, t.ref + ' · ' + (t.role ? t.role + ' · ' : '') + KIND_LABEL[t.kind || 'code']), h('div', { className: 'th-ititle' }, t.title))),
-    tk.open ? h('div', { className: 'th-livebox' }, h(Mini, { agent: tk.open.agent }), h('span', { style: { flex: 1, minWidth: 0 } }, (tk.open.kind === 'review' ? 'Reviewing · ' : 'Working · ') + (tk.open.progress || 'starting')), h(Elapsed, { since: tk.open.started_at || tk.open.created_at })) : null,
+    hasPage(tk) || t.worktree ? h('div', { className: 'th-quick' },
+      hasPage(tk) ? h(Btn, { sm: true, primary: !tk.open && ['built', 'approved', 'changes', 'merged'].includes(t.status), title: 'Open what ' + t.ref + ' built in your browser', onClick: () => openPreview(t.ref) }, h(Icon, { name: 'play', size: 12 }), t.status === 'merged' ? 'Open the merged site' : 'Open preview') : null,
+      t.worktree && t.status !== 'merged' ? h(Btn, { sm: true, ghost: true, title: t.worktree, onClick: () => showFiles(t.worktree) }, h(Icon, { name: 'folder', size: 12 }), 'Show files') : null) : null,
+    tk.open ? h('div', { className: 'th-livebox' }, h(Mini, { agent: tk.open.agent }), h('span', { style: { flex: 1, minWidth: 0 }, title: tk.open.progress || '' }, (tk.open.kind === 'review' ? 'Reviewing · ' : 'Working · ') + humanize(tk.open.progress)), h(Elapsed, { since: tk.open.started_at || tk.open.created_at })) : null,
     err ? h('div', { className: 'th-errbox' }, h('b', null, h(Icon, { name: 'alert', size: 13 }), ' ', last.kind === 'review' ? 'The review stopped' : 'The run stopped', ' · ', last.status), h('span', null, err.length > 280 ? err.slice(0, 278) + '…' : err)) : null,
     tk.issues.length ? [
       h('span', { key: 'p', className: 'th-prog' }, h(Icon, { name: 'ring', size: 15 }), h('span', { className: 'th-lbl' }, `${tk.issues.length - open} of ${tk.issues.length} fixed`), h('span', { className: 'th-track' }, h('span', { style: { width: (tk.issues.length - open) / tk.issues.length * 100 + '%' } }))),
@@ -584,12 +765,19 @@ function Inspector ({ snap, d, selected, tab, setTab, close }) {
       h('span', { className: 'th-k' }, h(Icon, { name: 'build', size: 14 }), 'Builder'), h('span', { className: 'th-person' }, h(Mini, { agent }), A(agent)),
       h('span', { className: 'th-k' }, h(Icon, { name: 'review', size: 14 }), 'Reviewer'), h('span', { className: 'th-person' }, h(Mini, { agent: tk.reviewer }), A(tk.reviewer)),
       h('span', { className: 'th-k' }, h(Icon, { name: 'spark', size: 14 }), 'Model'), h('span', null, h(ModelPicker, { agent, model: t.model || '', effort: t.effort || '', onChange: v => act({ action: 'update', task: t.ref, model: v.model, effort: v.effort }, () => `${t.ref} will use ${modelLabel(agent, v.model)}${v.effort ? ' · ' + v.effort + ' effort' : ''}`) })),
+      reachOf(snap, t.ref).length ? [
+        h('span', { key: 'rk', className: 'th-k' }, h(Icon, { name: 'arrowr', size: 14 }), 'Reached'),
+        h('span', { key: 'rv', className: 'th-reachlist' }, reachOf(snap, t.ref).map(e => h('span', { key: e.agent, className: 'th-reachrow', title: reachWords(e, t.ref) },
+          h(ReachAv, { e, from: t.ref, size: 20 }),
+          h('span', null, e.state === 'behind' ? `${e.task} is on v${e.have} of ${e.latest}` : e.state === 'waiting' ? `${e.task} starts from the newest` : e.state === 'notyet' ? 'hasn’t seen the latest decision' : e.task ? `${e.task} has the newest` : 'has the decisions'),
+          e.state === 'behind' ? h(Btn, { sm: true, ghost: true, onClick: () => act({ action: 'sync', task: e.task }, r => r.updated && r.updated.length ? `${e.task} now uses the newest ${r.updated.join(', ')}` : r.message) }, 'Update') : null)))
+      ] : null,
       h('span', { className: 'th-k' }, h(Icon, { name: 'branch', size: 14 }), 'Branch'), h('span', { className: 'th-mono', title: t.branch || '', style: { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, t.branch || 'not started')),
     t.detail ? h(Detail, { text: t.detail }) : null,
     tk.produced.length || tk.changed.length ? [
       h('div', { key: 'ps', className: 'th-sec' }, 'Produced', h('span', null, tk.produced.length)),
-      tk.images.length ? h('div', { key: 'pg', className: 'th-grid' }, tk.images.slice(0, 9).map(p => h('figure', { key: p }, h(Thumb, { task: t.ref, path: p, size: 86 }), h('figcaption', { title: p }, p.split('/').pop())))) : null,
-      h('div', { key: 'pl', className: 'th-files' }, tk.changed.filter(c => !IMG.test(c.path) || !tk.images.includes(c.path)).slice(0, 14).map(c => h('div', { key: c.path, className: 'th-file', title: c.path },
+      outputsOf(tk).length ? h('div', { key: 'pg', className: 'th-grid' }, outputsOf(tk).slice(0, 9).map(p => h('figure', { key: p, className: 'th-ofig', title: 'View ' + p, onClick: () => openOutput(t.ref, p) }, h(OutputTile, { task: t.ref, path: p, size: 86 }), h('figcaption', null, p.split('/').pop())))) : null,
+      h('div', { key: 'pl', className: 'th-files' }, tk.changed.filter(c => !outputsOf(tk).includes(c.path)).slice(0, 14).map(c => h('div', { key: c.path, className: 'th-file' + (c.status !== 'D' && outKind(c.path) !== 'file' ? ' th-file-open' : ''), title: c.path, onClick: c.status !== 'D' && outKind(c.path) !== 'file' ? () => openOutput(t.ref, c.path) : undefined },
         h('span', { className: 'th-fs th-fs-' + c.status, title: { A: 'Added', M: 'Modified', D: 'Deleted', R: 'Renamed' }[c.status] || c.status }, c.status), h('span', { className: 'th-mono th-fpath' }, c.path),
         tk.outputs.includes(c.path) ? h('span', { className: 'th-out' }, 'output') : null)))
     ] : null,
@@ -633,11 +821,90 @@ function Detail ({ text }) {
 }
 
 function Keys ({ onClose }) {
-  const rows = [['/', 'Tell Hermes what to do'], ['N', 'New task'], ['J K', 'Next / previous task'], ['1 2', 'Canvas / Board'], ['⌘ ↵', 'Send feedback'], ['Esc', 'Close'], ['?', 'Show these shortcuts']]
+  const rows = [['/', 'Tell Hermes what to do'], ['N', 'New task'], ['J K', 'Next / previous task'], ['1 2 3', 'Canvas / Board / Outputs'], ['⌘ ↵', 'Send feedback'], ['Esc', 'Close'], ['?', 'Show these shortcuts']]
   return h('div', { className: 'th-keys', onClick: onClose },
     h('div', { className: 'th-keys-card', role: 'dialog', 'aria-label': 'Keyboard shortcuts', onClick: e => e.stopPropagation() },
       h('div', { className: 'th-conn-title' }, 'Keyboard shortcuts'),
       rows.map(([k, l]) => h('div', { key: k, className: 'th-keys-row' }, h('span', null, l), h('span', null, k.split(' ').map(x => h('kbd', { key: x, className: 'th-kbd' }, x)))))))
+}
+
+function OutputTile ({ task, path, size = 86 }) {
+  const kind = outKind(path)
+  if (kind === 'image') return h(Thumb, { task, path, size })
+  return h('span', { className: 'th-otile th-otile-' + kind, style: { width: size, height: size } }, h(Icon, { name: OUT_ICON[kind], size: Math.round(size * 0.3) }),
+    kind === 'video' || kind === 'audio' ? h('i', { className: 'th-oplay' }, h(Icon, { name: 'play', size: 11 })) : null)
+}
+
+// Look at one output in place. The page's frames cannot load localhost, so video, sound and images
+// arrive as data URLs and documents as text; web pages and PDFs open in the browser, where they work fully.
+function Viewer ({ v, snap, close }) {
+  const [info, setInfo] = useState(null)
+  const [media, setMedia] = useState(null)
+  const [err, setErr] = useState('')
+  const [attempt, setAttempt] = useState(0)
+  const thumb = useThumb(v.task, v.kind === 'image' ? v.path : '')
+  const inline = ['image', 'video', 'audio', 'text'].includes(v.kind)
+  useEffect(() => {
+    let live = true
+    setInfo(null); setMedia(null); setErr('')
+    // The backend may be restarting: try a few times before showing the error.
+    const retry = (fn, n = 0) => fn().catch(e => { if (!live) return; if (n < 3) setTimeout(() => retry(fn, n + 1), 1200 * (n + 1)); else setErr((e && e.message) || 'Could not open this file') })
+    retry(() => ctxRef.rest('/action', { method: 'POST', body: { project: store.project, action: 'output', task: v.task, path: v.path } }).then(r => { if (live) setInfo(r) }))
+    if (inline && !(v.kind === 'image' && thumb)) {
+      retry(() => ctxRef.rest(`/media?project=${encodeURIComponent(store.project)}&task=${encodeURIComponent(v.task)}&path=${encodeURIComponent(v.path)}`).then(r => { if (live) setMedia(r) }))
+    }
+    return () => { live = false }
+  }, [v.task, v.path, attempt])
+  const task = (snap.tasks || []).find(x => x.ref === v.task) || {}
+  const browse = async () => { if (!info) return; let ok = false; try { ok = await ctxRef.os.openExternal(info.url) } catch (e) {} if (!ok) window.open(info.url, '_blank') }
+  let body
+  if (err) body = h('div', { className: 'th-viewer-msg' }, err, h(Btn, { sm: true, onClick: () => setAttempt(n => n + 1) }, 'Try again'))
+  else if (v.kind === 'image' && (thumb || media)) body = h('img', { src: thumb || media.data, alt: v.path })
+  else if (v.kind === 'video' && media) body = h('video', { key: media.path, className: 'th-media', src: media.data, controls: true, autoPlay: true, playsInline: true })
+  else if (v.kind === 'audio' && media) body = h('div', { className: 'th-audiobox' }, h('span', { className: 'th-otile th-otile-audio', style: { width: 96, height: 96 } }, h(Icon, { name: 'music', size: 34 })),
+    h('b', null, v.path.split('/').pop()), h('audio', { key: media.path, src: media.data, controls: true, autoPlay: true }))
+  else if (v.kind === 'text' && media) body = h('pre', { className: 'th-viewer-text' }, media.text + (media.truncated ? '\n…' : ''))
+  else if (!inline) body = h('div', { className: 'th-viewer-open' }, h('span', { className: 'th-otile th-otile-' + v.kind, style: { width: 72, height: 72 } }, h(Icon, { name: OUT_ICON[v.kind], size: 24 })),
+    h('b', null, v.kind === 'page' ? 'Web pages run in your browser' : 'Opens in your browser'),
+    h('span', null, v.kind === 'page' ? 'Thoth serves this page on your computer only, with its images, styles and scripts.' : 'Your browser shows it best.'),
+    info ? h(Btn, { primary: true, onClick: browse }, h(Icon, { name: 'external', size: 13 }), 'Open ' + v.path.split('/').pop()) : h('span', { className: 'th-spin' }))
+  else body = h('div', { className: 'th-viewer-msg' }, h('span', { className: 'th-spin' }), 'Opening…')
+  return h('div', { className: 'th-viewer', onClick: close },
+    h('div', { className: 'th-viewer-card', role: 'dialog', 'aria-label': v.path, onClick: e => e.stopPropagation() },
+      h('div', { className: 'th-viewer-hd' },
+        h('span', { className: 'th-otile-sm th-otile-' + v.kind }, h(Icon, { name: OUT_ICON[v.kind], size: 13 })),
+        h('div', { style: { minWidth: 0, flex: 1 } }, h('b', null, v.path.split('/').pop()),
+          h('div', { className: 'th-muted', style: { fontSize: 11.5 } }, [OUT_LABEL[v.kind], v.task + (task.title ? ' · ' + task.title : ''), info ? kb(info.bytes) : ''].filter(Boolean).join(' · '))),
+        task.agent ? h(Mini, { agent: task.agent, size: 22 }) : null,
+        info ? h(Btn, { sm: true, onClick: browse }, h(Icon, { name: 'external', size: 12 }), 'Open in browser') : null,
+        info ? h(Btn, { sm: true, ghost: true, onClick: () => showFiles(info.folder + '/' + info.path) }, h(Icon, { name: 'folder', size: 12 }), 'Show in Finder') : null,
+        h('button', { className: 'th-ib', 'aria-label': 'Close', onClick: close }, h(Icon, { name: 'x', size: 15 }))),
+      h('div', { className: 'th-viewer-body th-viewer-' + v.kind }, body)))
+}
+
+// Everything the team made that you can look at, newest task first.
+function Outputs ({ snap, d }) {
+  const [filter, setFilter] = useState('all')
+  const items = [], seen = new Set()
+  for (const t of [...(snap.tasks || [])].reverse()) {
+    const tk = d.byTask[t.id]
+    // A later task that rewrote the same file has the version worth looking at.
+    for (const path of outputsOf(tk)) if (!seen.has(path)) { seen.add(path); items.push({ t, tk, path, kind: outKind(path) }) }
+  }
+  const groups = { all: () => true, image: i => i.kind === 'image', video: i => i.kind === 'video', audio: i => i.kind === 'audio', page: i => i.kind === 'page', docs: i => i.kind === 'pdf' || i.kind === 'text' }
+  const count = k => items.filter(groups[k]).length
+  const shown = items.filter(groups[filter])
+  const labels = { all: 'All', image: 'Images', video: 'Video', audio: 'Sound', page: 'Pages', docs: 'Docs' }
+  return h('div', { className: 'th-view th-outputs' },
+    h('div', { className: 'th-filters', style: { marginBottom: 12 } }, Object.keys(labels).filter(k => k === 'all' || count(k)).map(k =>
+      h('button', { key: k, className: filter === k ? 'th-on' : '', onClick: () => setFilter(k) }, labels[k], h('span', { className: 'th-n' }, count(k))))),
+    shown.length ? h('div', { className: 'th-ogrid' }, shown.map(i => h('button', { key: i.t.ref + i.path, className: 'th-ocard', title: i.path, onClick: () => openOutput(i.t.ref, i.path) },
+      h('div', { className: 'th-ocard-media' }, h(OutputTile, { task: i.t.ref, path: i.path, size: 150 })),
+      h('div', { className: 'th-ocard-ft' },
+        h('b', null, i.path.split('/').pop()),
+        h('span', null, h(Mini, { agent: i.t.agent || 'claude', size: 16 }), i.t.ref + ' · ' + OUT_LABEL[i.kind] + (i.t.status === 'merged' ? ' · shipped' : '')))))
+    ) : h('div', { className: 'th-emptyout' }, h(Icon, { name: 'grid', size: 22 }), h('b', null, 'Nothing to look at yet'),
+      h('span', null, 'Images, videos, sounds, web pages and documents your agents make show up here — click one to view or play it.')))
 }
 
 /* ------------------------------------------------------------------ page */
@@ -659,20 +926,21 @@ function ThothPage () {
   useEffect(() => {
     refresh()
     const get = k => Promise.resolve(ctxRef.storage && ctxRef.storage.get && ctxRef.storage.get(k)).catch(() => null)
-    get('view').then(v => { if (v === 'board' || v === 'canvas') setView(v) })
+    get('view').then(v => { if (v === 'board' || v === 'canvas' || v === 'outputs') setView(v) })
     get('overview').then(v => { if (v === 'show' || v === 'hide') setOverviewState(v === 'show') })
   }, [])
   useLayoutEffect(() => { const b = seg.current && seg.current.querySelector('.th-on'); if (b) setThumb({ left: b.offsetLeft, width: b.offsetWidth }) }, [view, s.snap])
   useEffect(() => {
     const key = e => {
       if (e.target.closest && e.target.closest('input,textarea,select,[contenteditable]')) return
-      if (e.key === 'Escape') { setOpen(false); setConfirm(''); setKeys(false); return }
+      if (e.key === 'Escape') { setOpen(false); setConfirm(''); setKeys(false); if (store.viewer) { store.viewer = null; emit() } return }
       if (e.metaKey || e.ctrlKey || e.altKey) return
       if (e.key === '?') { setKeys(k => !k); return }
       if (e.key === '/') { const el = document.querySelector('.th-cmd-input'); if (el) { e.preventDefault(); el.focus() } return }
       if (!store.snap) return
       if (e.key === '1') switchView('canvas')
       else if (e.key === '2') switchView('board')
+      else if (e.key === '3') switchView('outputs')
       else if (e.key === 'n' || e.key === 'N') { e.preventDefault(); dispatchEvent(new CustomEvent('thoth:add')) }
       else if (e.key === 'j' || e.key === 'k') {
         const refs = (store.snap.tasks || []).map(t => t.ref)
@@ -687,10 +955,10 @@ function ThothPage () {
   const select = ref => { setSelected(ref); setTab('task'); setOpen(true) }
   const css = [h('style', { key: 's' }, CSS), h(LogoSprite, { key: 'l' })]
   if (!s.snap) {
-    const first = !s.error && !s.projects.length
+    const first = !s.error && !s.projects.length && !s.reconnecting
     return h('div', { className: 'th-root' }, css, h('div', { className: 'th-emptypage' },
       h('div', { className: 'th-onb-logos' }, ['claude', 'hermes', 'codex'].map(a => h(Mini, { key: a, agent: a, size: a === 'hermes' ? 56 : 42 }))),
-      h('h2', null, s.error ? 'Thoth can’t reach its backend' : first ? 'One brain for your whole AI team' : 'Loading the shared brain…'),
+      h('h2', null, s.error ? 'Thoth can’t reach its backend' : first ? 'One brain for your whole AI team' : s.reconnecting ? 'Reconnecting to Thoth…' : 'Loading the shared brain…'),
       h('p', null, s.error ? s.error + '. Make sure the Thoth plugin is enabled in Capabilities → Plugins.' : first ? 'Hermes plans, Claude Code and Codex build in parallel, review each other, and everything they decide and make stays in one place.' : ''),
       first ? h('ol', { className: 'th-onb' },
         h('li', null, h('b', null, 'Open a chat in a git project'), h('span', null, 'Any folder with git works — code, a game, docs.')),
@@ -718,20 +986,25 @@ function ThothPage () {
       h('button', { className: 'th-chip', title: 'Hand coordination to ' + AGENTS[nextCoord].name, onClick: () => act({ action: 'coordinator', agent: nextCoord }, r => `${AGENTS[r.coordinator].name} coordinates now. Hermes can print the setup command.`) },
         h(Icon, { name: 'crown', size: 13, fill: true, style: { color: '#e0a81e' } }), h(Mini, { agent: coord, size: 18 }), AGENTS[coord].name)),
     h('div', { className: 'th-content' },
+      s.newProject ? h('div', { className: 'th-banner', role: 'status' }, h(Icon, { name: 'spark', size: 15 }),
+        h('span', null, 'Hermes started a new project: ', h('b', null, s.newProject.name), s.newProject.goal ? ' — ' + s.newProject.goal : ''),
+        h('button', { className: 'th-btn th-sm th-primary', onClick: () => switchProject(s.newProject.path) }, 'Open it'),
+        h('button', { className: 'th-ib', 'aria-label': 'Dismiss', onClick: () => { store.newProject = null; emit() } }, h(Icon, { name: 'x', size: 14 }))) : null,
       overview
         ? h('div', { className: 'th-ovwrap' }, h(Metrics, { snap, d, select }),
             h('button', { className: 'th-ovhandle', onClick: () => setOverview(false), title: 'Collapse the overview', 'aria-label': 'Collapse the overview', 'aria-expanded': true }, h('svg', { width: 12, height: 12, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 2.4, strokeLinecap: 'round', strokeLinejoin: 'round' }, h('path', { d: 'M7 14l5-5 5 5' }))))
         : h(OverviewStrip, { snap, select, expand: () => setOverview(true) }),
-      h('section', { className: 'th-workspace' + (view === 'board' ? ' th-boardmode' : '') + (open ? ' th-open' : '') },
+      h('section', { className: 'th-workspace' + (view !== 'canvas' ? ' th-boardmode' : '') + (open ? ' th-open' : '') },
         h('div', { className: 'th-surface' },
-          view === 'canvas' ? h(Canvas, { snap, d, selected: sel, select, project: s.project }) : h(Board, { snap, d, selected: sel, select, askMerge: setConfirm }),
+          view === 'canvas' ? h(Canvas, { snap, d, selected: sel, select, project: s.project }) : view === 'board' ? h(Board, { snap, d, selected: sel, select, askMerge: setConfirm }) : h(Outputs, { snap, d }),
           confirm ? h('div', { className: 'th-confirm' }, h('span', null, `Merge ${confirm} into ${snap.meta.base_branch}?`),
             h(Btn, { sm: true, primary: true, onClick: () => { const ref = confirm; return act({ action: 'merge', task: ref }, r => `Merged ${ref} · ${r.commit.slice(0, 7)}`).then(() => setConfirm('')) } }, 'Merge'),
             h('button', { className: 'th-btn th-sm', onClick: () => setConfirm('') }, 'Cancel')) : null,
           h('div', { className: 'th-dock' },
             h('div', { className: 'th-seg', ref: seg }, h('span', { className: 'th-thumb', style: thumb }),
               h('button', { className: view === 'canvas' ? 'th-on' : '', title: 'Canvas (1)', onClick: () => switchView('canvas') }, h(Icon, { name: 'canvas' }), 'Canvas'),
-              h('button', { className: view === 'board' ? 'th-on' : '', title: 'Board (2)', onClick: () => switchView('board') }, h(Icon, { name: 'board' }), 'Board')),
+              h('button', { className: view === 'board' ? 'th-on' : '', title: 'Board (2)', onClick: () => switchView('board') }, h(Icon, { name: 'board' }), 'Board'),
+              h('button', { className: view === 'outputs' ? 'th-on' : '', title: 'Outputs (3)', onClick: () => switchView('outputs') }, h(Icon, { name: 'grid' }), 'Outputs')),
             h('span', { className: 'th-dockdiv' }),
             h(AddTask, { snap }),
             h('button', { className: 'th-ib', title: 'Keyboard shortcuts (?)', 'aria-label': 'Keyboard shortcuts', onClick: () => setKeys(true) }, h(Icon, { name: 'keys', size: 16 })))),
@@ -740,7 +1013,8 @@ function ThothPage () {
             h('div', { className: 'th-tabs' }, h('button', { className: tab === 'task' ? 'th-on' : '', onClick: () => setTab('task') }, 'Task'), h('button', { className: tab === 'brain' ? 'th-on' : '', onClick: () => setTab('brain') }, 'Shared brain')),
             h('button', { className: 'th-closeI', onClick: () => setOpen(false), 'aria-label': 'Close panel' }, h(Icon, { name: 'x' }))),
           h(Inspector, { snap, d, selected: sel, tab, setTab }))),
-      keys ? h(Keys, { onClose: () => setKeys(false) }) : null),
+      keys ? h(Keys, { onClose: () => setKeys(false) }) : null,
+      s.viewer ? h(Viewer, { v: s.viewer, snap, close: () => { store.viewer = null; emit() } }) : null),
     h(CommandBar, { snap, project, d }))
 }
 
@@ -775,7 +1049,7 @@ function CommandBar ({ snap, project, d }) {
     const body = (value || text).trim()
     if (!body || sending) return
     setSending(true)
-    const msg = `[Thoth · ${project.name} · ${snap.project}] ${body}`
+    const msg = `[From the Thoth page. Project open there: ${project.name} (${snap.project}). You coordinate with the Thoth tools; Claude Code and Codex do the work.] ${body}`
     const where = await sendToHermes(msg)
     setSending(false)
     if (!where) { host.notify({ kind: 'warning', message: 'Open a Hermes chat, then try again' }); return }
@@ -968,7 +1242,7 @@ function ProjectSwitcher ({ s, current }) {
     addEventListener('pointerdown', close); addEventListener('keydown', esc)
     return () => { removeEventListener('pointerdown', close); removeEventListener('keydown', esc) }
   }, [open])
-  const pick = path => { setOpen(false); if (path === s.project) return; s.project = path; s.snap = null; try { ctxRef.storage.set('project', path) } catch (err) {} emit(); refresh() }
+  const pick = path => { setOpen(false); switchProject(path) }
   return h('span', { className: 'th-switch', ref },
     h('button', { className: 'th-switch-btn', onClick: () => setOpen(o => !o), 'aria-expanded': open }, h('b', null, current.name), h('svg', { width: 12, height: 12, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 2.2, strokeLinecap: 'round' }, h('path', { d: 'M7 10l5 5 5-5' }))),
     open ? h('div', { className: 'th-menu', role: 'menu' }, s.projects.map(p => h('button', { key: p.path, role: 'menuitem', className: 'th-menu-it' + (p.path === s.project ? ' th-on' : ''), onClick: () => pick(p.path) },
@@ -1129,7 +1403,7 @@ height:100%;display:flex;flex-direction:column;color:var(--th-text);font-size:13
 .th-tokens{display:flex;align-items:center;gap:14px;margin-top:10px;padding-top:10px;border-top:1px solid var(--th-line);font-size:12px;min-width:0}
 .th-tok{display:flex;align-items:baseline;gap:5px;white-space:nowrap;flex-shrink:0}.th-tok b{font-size:14px;font-weight:600;font-variant-numeric:tabular-nums}.th-tok span{color:var(--th-t3)}.th-tok em{font-style:normal;font-size:11px}
 .th-tokbar{flex:1;min-width:24px;max-width:120px;height:6px;border-radius:3px;background:var(--th-sunken);overflow:hidden;display:flex}.th-tokbar span{height:100%}
-.th-legend .th-mini{margin-right:5px;vertical-align:-4px}
+.th-legend>span{display:inline-flex;align-items:center;gap:6px;line-height:16px}.th-legend .th-mini{margin:0}
 .th-pickable{cursor:pointer;transition:transform .2s var(--th-spring),box-shadow .2s}.th-pickable:hover{transform:translateY(-1px)}
 .th-picked{box-shadow:0 0 0 2px var(--th-select);border-color:transparent}
 .th-revise{margin-top:16px;padding:12px;border-radius:14px;background:var(--th-sunken)}
@@ -1244,6 +1518,49 @@ button.th-ost{padding:0;border-radius:8px}button.th-ost:hover b{text-decoration:
 .th-need-inline .th-nexttag{position:static}.th-need-inline .th-mini{width:22px!important;height:22px!important}
 .th-need-inline .th-need-tx span{display:none}.th-need-inline:hover .th-need-tx b{text-decoration:underline;text-decoration-color:var(--th-line2)}
 .th-omore{font-size:12px;white-space:nowrap}
+.th-banner{display:flex;align-items:center;gap:10px;padding:7px 7px 7px 14px;border-radius:14px;background:color-mix(in srgb,var(--th-hermes) 8%,var(--th-panel));border:1px solid color-mix(in srgb,var(--th-hermes) 24%,transparent);font-size:12.5px;color:var(--th-t2);animation:th-rise .4s var(--th-spring)}
+.th-banner>span{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.th-banner b{color:var(--th-text)}.th-banner>svg{color:var(--th-hermes);flex-shrink:0}.th-banner .th-ib{width:28px;height:28px}
+.th-quick{display:flex;gap:6px;flex-wrap:wrap;margin-top:10px}
+.th-tagbtn{cursor:pointer;border:0;color:var(--th-hermes);gap:2px}.th-tagbtn:hover{background:color-mix(in srgb,var(--th-hermes) 12%,transparent)}
+.th-canvas{cursor:grab}.th-canvas.th-panning{cursor:grabbing}.th-panning .th-world{transition:none}
+.th-node.th-stack{box-shadow:5px 5px 0 -1px var(--th-panel),5px 5px 0 0 var(--th-line2),10px 10px 0 -1px var(--th-panel),10px 10px 0 0 var(--th-line),var(--th-shadow)}
+.th-presence{position:relative;display:inline-flex;border-radius:50%}.th-presence::after{content:"";position:absolute;inset:-3px;border-radius:50%;border:2px solid var(--c);animation:th-attn 1.6s ease-out infinite;pointer-events:none}
+.th-otile{display:inline-grid;place-items:center;position:relative;border-radius:9px;border:1px solid var(--th-line);color:var(--th-t3);background:var(--th-sunken);flex-shrink:0}
+.th-otile-video{background:linear-gradient(160deg,#20232b,#3a3f4b);color:#fff;border-color:transparent}.th-otile-audio{background:color-mix(in srgb,var(--th-hermes) 14%,var(--th-panel));color:var(--th-hermes)}
+.th-otile-page{background:color-mix(in srgb,var(--th-codex) 10%,var(--th-panel));color:var(--th-codex)}.th-otile-pdf,.th-otile-text{background:var(--th-panel)}
+.th-oplay{position:absolute;right:6px;bottom:6px;width:20px;height:20px;border-radius:50%;display:grid;place-items:center;background:rgba(255,255,255,.92);color:#111}
+.th-otile-sm{width:28px;height:28px;border-radius:8px;display:grid;place-items:center;border:1px solid var(--th-line);background:var(--th-sunken);color:var(--th-t2);flex-shrink:0}
+.th-ofig{cursor:pointer}.th-ofig:hover .th-thumbimg,.th-ofig:hover .th-otile{box-shadow:0 0 0 2px var(--th-select)}
+.th-file-open{cursor:pointer;border-radius:6px}.th-file-open:hover{background:var(--th-hover)}
+.th-viewer{position:fixed;inset:0;z-index:70;display:grid;place-items:center;padding:28px;background:color-mix(in srgb,#000 38%,transparent);backdrop-filter:blur(3px);animation:th-fade .2s ease}
+.th-viewer-card{width:min(1080px,100%);height:min(760px,100%);display:flex;flex-direction:column;background:var(--th-panel);border:1px solid var(--th-line);border-radius:18px;box-shadow:var(--th-lift);overflow:hidden;animation:th-rise .35s var(--th-spring)}
+.th-viewer-hd{display:flex;align-items:center;gap:10px;padding:10px 10px 10px 14px;border-bottom:1px solid var(--th-line)}.th-viewer-hd b{display:block;font-size:13.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.th-viewer-body{flex:1;min-height:0;display:grid;place-items:center;background:var(--th-sunken)}.th-viewer-body img{max-width:100%;max-height:100%;object-fit:contain;image-rendering:pixelated}
+.th-viewer-video,.th-viewer-audio{background:#111}.th-frame{width:100%;height:100%;border:0;background:#fff}.th-viewer-video .th-frame,.th-viewer-audio .th-frame{background:#111}
+.th-outputs{padding:16px 16px 76px;overflow:auto}.th-filters .th-n{margin-left:6px}
+.th-ogrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(170px,1fr));gap:12px}
+.th-ocard{display:flex;flex-direction:column;text-align:left;padding:8px;border-radius:14px;background:var(--th-panel);border:1px solid var(--th-line)!important;box-shadow:var(--th-shadow);transition:box-shadow .25s,transform .25s var(--th-spring);animation:th-rise .4s var(--th-spring) both}
+.th-ocard:hover{box-shadow:var(--th-lift);transform:translateY(-2px)}
+.th-ocard-media{display:grid;place-items:center;aspect-ratio:4/3;border-radius:10px;overflow:hidden;background:var(--th-sunken)}.th-ocard-media .th-thumbimg,.th-ocard-media .th-otile{width:100%!important;height:100%!important;border-radius:10px;border:0}
+.th-ocard-ft{padding:8px 2px 2px;min-width:0}.th-ocard-ft b{display:block;font-size:12.5px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.th-ocard-ft span{display:flex;align-items:center;gap:6px;margin-top:3px;font-size:11px;color:var(--th-t3)}
+.th-emptyout{display:grid;justify-items:center;gap:6px;max-width:360px;margin:60px auto;text-align:center;color:var(--th-t3);font-size:12.5px}.th-emptyout b{color:var(--th-text);font-size:14px}
+.th-older{justify-self:center;font-size:12px;padding:6px 0}
+.th-viewer-msg{display:flex;align-items:center;gap:10px;font-size:12.5px;color:var(--th-t3)}.th-viewer-video .th-viewer-msg,.th-viewer-audio .th-viewer-msg{color:#bbb}
+.th-viewer-text{margin:0;align-self:stretch;justify-self:stretch;overflow:auto;padding:18px 22px;font:12.5px/1.6 var(--font-mono,ui-monospace,monospace);white-space:pre-wrap;color:var(--th-text);background:var(--th-panel)}
+.th-viewer-open{display:grid;justify-items:center;gap:10px;max-width:380px;text-align:center;font-size:12.5px;color:var(--th-t3)}.th-viewer-open b{font-size:15px;color:var(--th-text)}
+.th-viewer-body.th-viewer-text{place-items:stretch}
+.th-media{max-width:100%;max-height:100%;width:100%;height:100%;object-fit:contain;background:#000}
+.th-audiobox{display:grid;justify-items:center;gap:14px;color:#ddd;font-size:13px}.th-audiobox audio{width:min(420px,80vw)}
+.th-reach{display:inline-flex;align-items:center;gap:4px;margin:0 auto 0 8px;color:var(--th-t4)}
+.th-rav{position:relative;display:inline-flex;border-radius:50%}.th-rav .th-mini{margin:0!important}
+.th-rav.r-ok .th-mini{box-shadow:0 0 0 1.5px var(--th-ok)}.th-rav.r-behind .th-mini{box-shadow:0 0 0 1.5px var(--th-warn)}
+.th-rav.r-waiting .th-mini,.th-rav.r-notyet .th-mini{border-style:dashed!important;border-color:var(--th-t4)!important}.th-rav.r-waiting{opacity:.6}.th-rav.r-notyet .th-mini{box-shadow:0 0 0 1.5px color-mix(in srgb,var(--th-warn) 55%,transparent)}
+.th-rb{position:absolute;right:-5px;bottom:-4px;min-width:12px;height:12px;padding:0 2px;border-radius:6px;font:700 8px/12px -apple-system,system-ui,sans-serif;font-style:normal;color:#fff;text-align:center;border:1.5px solid var(--th-panel)}
+.th-rb-ok{background:var(--th-ok)}.th-rb-behind{background:var(--th-warn)}.th-rb-notyet{background:#b9a27a}
+.th-behind{position:absolute;top:-10px;right:12px;display:inline-flex;align-items:center;gap:4px;height:20px;padding:0 8px;border-radius:999px;font-size:10.5px;font-weight:700;color:#8a5200;background:#fff4e0;border:1px solid #f3c77a!important;box-shadow:var(--th-shadow);cursor:pointer;z-index:2}
+.th-behind:hover{background:#ffe9c2}
+.th-reachlist{display:grid;gap:4px;min-width:0}.th-reachrow{display:flex;align-items:center;gap:7px;font-size:12px;color:var(--th-t2);min-width:0}.th-reachrow>span:nth-child(2){flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 `
 
 /* ------------------------------------------------------------------ plugin */

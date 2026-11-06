@@ -67,7 +67,7 @@ def has_commits(path: str | Path) -> bool:
 def ensure_initial_commit(path: str | Path) -> None:
     """Worktrees need a commit to branch from; make an empty one in a brand-new repo."""
     if not has_commits(path):
-        git(path, "commit", "--allow-empty", "-m", "thoth: initial commit")
+        git(path, "-c", "user.name=Thoth", "-c", "user.email=thoth@localhost", "commit", "--allow-empty", "--no-verify", "-m", "thoth: initial commit")
 
 
 def exclude_brain_dir(root: Path) -> None:
@@ -112,6 +112,84 @@ def remove_worktree(root: Path, worktree: Path) -> None:
     if worktree.exists():
         git(root, "worktree", "remove", "--force", str(worktree), check=False)
     git(root, "worktree", "prune", check=False)
+
+
+def delete_branch(root: Path, branch: str) -> None:
+    if branch and branch_exists(root, branch):
+        git(root, "branch", "-D", branch, check=False)
+
+
+# -- a new worktree's environment ----------------------------------------------
+#
+# A worktree is a clean checkout: ignored folders such as node_modules or .venv
+# and ignored files such as .env are not there, and agents cannot download them
+# because their sandboxes have no network. Thoth links the folders (and, when
+# allowed, copies the env files) from the main checkout.
+
+DEFAULT_DEPENDENCY_DIRS = ("node_modules", ".venv", "venv")
+ENV_FILE = re.compile(r"^\.env(\.[\w.-]+)?$")
+_EXCLUDE_HEADER = "# Thoth: dependency links inside task worktrees"
+
+
+def ignored_entries(root: Path) -> list[str]:
+    """Ignored, untracked paths in the main checkout; folders end with '/' and are not descended into."""
+    out = git(root, "ls-files", "--others", "--ignored", "--exclude-standard", "--directory", check=False)
+    return [line for line in out.splitlines() if line and not line.startswith((f"{BRAIN_DIRNAME}/", ".git/"))]
+
+
+def _exclude_exactly(root: Path, rel_paths: list[str]) -> None:
+    """Ignore these paths in every worktree, as files or links (a `dir/` pattern does not match a symlink)."""
+    git_dir = Path(git(root, "rev-parse", "--git-common-dir"))
+    if not git_dir.is_absolute():
+        git_dir = (root / git_dir).resolve()
+    exclude = git_dir / "info" / "exclude"
+    exclude.parent.mkdir(parents=True, exist_ok=True)
+    existing = exclude.read_text(encoding="utf-8") if exclude.exists() else ""
+    lines = existing.splitlines()
+    new = [f"/{p}" for p in rel_paths if f"/{p}" not in lines]
+    if not new:
+        return
+    with exclude.open("a", encoding="utf-8") as fh:
+        if existing and not existing.endswith("\n"):
+            fh.write("\n")
+        if _EXCLUDE_HEADER not in lines:
+            fh.write(_EXCLUDE_HEADER + "\n")
+        fh.write("\n".join(new) + "\n")
+
+
+def link_dependencies(root: Path, worktree: Path, names: tuple[str, ...] | list[str] = DEFAULT_DEPENDENCY_DIRS) -> list[str]:
+    """Symlink ignored dependency folders from the main checkout into the worktree. Returns what was linked."""
+    wanted = set(names)
+    linked: list[str] = []
+    for entry in ignored_entries(root):
+        if not entry.endswith("/"):
+            continue
+        rel = entry.rstrip("/")
+        if Path(rel).name not in wanted or any(part in wanted for part in Path(rel).parts[:-1]):
+            continue
+        src, dst = root / rel, worktree / rel
+        if not src.is_dir() or dst.exists() or dst.is_symlink() or not dst.parent.is_dir():
+            continue
+        linked.append(rel)
+    if linked:
+        _exclude_exactly(root, linked)  # before linking, so a commit can never pick the links up
+        for rel in linked:
+            (worktree / rel).symlink_to(root / rel, target_is_directory=True)
+    return linked[:20]
+
+
+def copy_env_files(root: Path, worktree: Path) -> list[str]:
+    """Copy ignored .env files (never tracked or unignored ones) into the worktree. Returns what was copied."""
+    copied: list[str] = []
+    for entry in ignored_entries(root):
+        if entry.endswith("/") or not ENV_FILE.match(Path(entry).name):
+            continue
+        src, dst = root / entry, worktree / entry
+        if not src.is_file() or dst.exists() or not dst.parent.is_dir():
+            continue
+        dst.write_bytes(src.read_bytes())
+        copied.append(entry)
+    return copied[:20]
 
 
 def is_dirty(path: str | Path) -> bool:

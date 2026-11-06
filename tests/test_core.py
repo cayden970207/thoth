@@ -133,7 +133,7 @@ def test_gated_tools_need_the_hook(repo):
     plugin = _load_plugin()
     ctx = FakeCtx()
     plugin.register(ctx)
-    assert len(ctx.tools) == 17 and "coordinate" in ctx.skills
+    assert len(ctx.tools) == 18 and "coordinate" in ctx.skills
     init = json.loads(ctx.tools["thoth_init"]({"project": str(repo), "goal": "g"}, session_id="s1"))
     assert init["ok"]
     json.loads(ctx.tools["thoth_plan"]({"project": str(repo), "tasks": [{"title": "T", "agent": "codex"}]}, session_id="s1"))
@@ -146,6 +146,12 @@ def test_gated_tools_need_the_hook(repo):
     assert decision["rule_key"].startswith("thoth:merge:")
     # Ungated tools pass straight through.
     assert ctx.hooks["pre_tool_call"](tool_name="thoth_status", args={}, session_id="s1") is None
+    # A setup command runs outside the sandbox, so it needs approval too, and says exactly what will run.
+    setup_args = {"project": str(repo), "setup": "npm ci"}
+    assert not json.loads(ctx.tools["thoth_init"](setup_args, session_id="s1"))["ok"]
+    decision = ctx.hooks["pre_tool_call"](tool_name="thoth_init", args=setup_args, session_id="s1")
+    assert decision["action"] == "approve" and "`npm ci`" in decision["message"] and decision["rule_key"].startswith("thoth:setup:")
+    assert json.loads(ctx.tools["thoth_init"](setup_args, session_id="s1"))["ok"]
     status = ctx.commands["thoth"]("status")
     assert "T1" in status
 
@@ -326,3 +332,191 @@ def test_model_and_effort_reach_the_cli():
     assert x[x.index("--model") + 1] == "gpt-6-astra" and 'model_reasoning_effort="ultra"' in x
     y = CodexDriver({"codex_model": "gpt-6-astra"}).command(kind="build", session_id="", mcp=None, model="gpt-6.1-sol")
     assert y[y.index("--model") + 1] == "gpt-6.1-sol"
+
+
+def _built(svc, brain, ref, files, msg):
+    """Give a task a worktree and a committed version, as if its agent had finished."""
+    from thoth_core import gitops
+    task = svc._prepare_worktree(brain, brain.task(int(ref[1:])))
+    wt = Path(task["worktree"])
+    for name, text in files.items():
+        (wt / name).write_text(text)
+    sha = gitops.commit_all(wt, msg)
+    brain.update_task(task["id"], status="built", head_commit=sha)
+    return wt
+
+
+def test_task_with_two_unmerged_dependencies_starts_with_both(repo):
+    svc = Thoth(mcp_launcher=None)
+    svc.init(str(repo))
+    svc.plan(str(repo), [{"title": "Art", "agent": "codex"}, {"title": "Page", "agent": "claude"},
+                         {"title": "Integrate", "agent": "claude", "depends_on": [1, 2]}])
+    brain = Brain.open(repo)
+    _built(svc, brain, "T1", {"art.txt": "hero\n"}, "art")
+    _built(svc, brain, "T2", {"page.html": "<h1>hi</h1>\n"}, "page")
+    t3 = svc._prepare_worktree(brain, brain.task(3))
+    wt = Path(t3["worktree"])
+    assert (wt / "art.txt").exists() and (wt / "page.html").exists()
+    from thoth_core import gitops
+    assert t3["base_commit"] == gitops.head(wt)  # the merge is T3's starting point: T1/T2 stay out of its diff
+    assert any("merged in" in n["body"] for n in brain.notes(task_id=3))
+
+
+def test_conflicting_dependencies_leave_nothing_half_made(repo):
+    svc = Thoth(mcp_launcher=None)
+    svc.init(str(repo))
+    svc.plan(str(repo), [{"title": "A", "agent": "codex"}, {"title": "B", "agent": "claude"},
+                         {"title": "C", "agent": "claude", "depends_on": [1, 2]}])
+    brain = Brain.open(repo)
+    _built(svc, brain, "T1", {"app.py": "print('a')\n"}, "a")
+    _built(svc, brain, "T2", {"app.py": "print('b')\n"}, "b")
+    with pytest.raises(BrainError, match="change the same lines"):
+        svc._prepare_worktree(brain, brain.task(3))
+    assert not (repo / ".thoth" / "worktrees" / "T3").exists() and not brain.task(3)["worktree"]
+
+
+def test_dependency_folders_are_linked_and_never_committed(repo):
+    from thoth_core import gitops
+    (repo / ".gitignore").write_text("node_modules/\n.env\n")
+    _git(repo, "add", ".gitignore")
+    _git(repo, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "ignore")
+    (repo / "node_modules" / "left-pad").mkdir(parents=True)
+    (repo / "node_modules" / "left-pad" / "index.js").write_text("module.exports = 1\n")
+    (repo / ".env").write_text("TOKEN=dev\n")
+    svc = Thoth(mcp_launcher=None, settings={"copy_env_files": True})
+    svc.init(str(repo))
+    svc.plan(str(repo), [{"title": "Use the package", "agent": "codex"}])
+    brain = Brain.open(repo)
+    wt = _built(svc, brain, "T1", {"main.js": "require('left-pad')\n"}, "use it")
+    assert (wt / "node_modules").is_symlink() and (wt / "node_modules" / "left-pad" / "index.js").exists()
+    assert (wt / ".env").read_text() == "TOKEN=dev\n"
+    committed = gitops.git(wt, "show", "--name-only", "--format=", "HEAD").split()
+    assert committed == ["main.js"] and not gitops.is_dirty(wt)
+    assert any("node_modules" in n["body"] for n in brain.notes(task_id=1))
+
+
+def test_setup_command_replaces_links(repo):
+    svc = Thoth(mcp_launcher=None)
+    svc.init(str(repo), setup="mkdir -p build && echo ok > build/ready")
+    svc.plan(str(repo), [{"title": "T", "agent": "codex"}])
+    brain = Brain.open(repo)
+    task = svc._prepare_worktree(brain, brain.task(1))
+    assert (Path(task["worktree"]) / "build" / "ready").read_text().strip() == "ok"
+    assert any("Setup `mkdir" in n["body"] for n in brain.notes(task_id=1))
+
+
+def test_preview_serves_pages_but_never_hidden_files(repo):
+    import urllib.error
+    import urllib.request
+    from thoth_core import preview
+    svc = Thoth(mcp_launcher=None)
+    svc.init(str(repo))
+    svc.plan(str(repo), [{"title": "Site", "agent": "claude"}, {"title": "Art", "agent": "codex"}])
+    brain = Brain.open(repo)
+    wt = _built(svc, brain, "T1", {"index.html": "<h1>Brewbox</h1>\n"}, "site")
+    (wt / ".env").write_text("SECRET=1\n")
+    _built(svc, brain, "T2", {"hero.txt": "x\n"}, "art")
+    try:
+        r = svc.preview(str(repo), "T1")
+        assert r["url"].startswith("http://127.0.0.1:")
+        assert b"Brewbox" in urllib.request.urlopen(r["url"], timeout=5).read()
+        base = r["url"].rsplit("/", 1)[0]
+        for hidden in ("/.env", "/%2Eenv", "/.git/config"):
+            with pytest.raises(urllib.error.HTTPError) as err:
+                urllib.request.urlopen(base + hidden, timeout=5)
+            assert err.value.code == 404
+        with pytest.raises(BrainError, match="no web page"):
+            svc.preview(str(repo), "T2")
+    finally:
+        preview.stop_all()
+
+
+def test_init_can_create_a_new_project(tmp_path):
+    svc = Thoth(mcp_launcher=None)
+    target = tmp_path / "sites" / "brewbox"
+    result = svc.init(str(target), goal="A coffee site", create=True)
+    assert (target / ".git").exists() and (target / ".thoth" / "brain.db").exists()
+    assert "new git repository" in result["created"]
+
+
+def test_notices_batch_and_skip_what_wait_reports(repo, monkeypatch):
+    plugin = _load_plugin()
+    ctx = FakeCtx()
+    plugin.register(ctx)
+    p = plugin._plugin
+    monkeypatch.setattr(sys.modules["thoth_plugin"].time, "sleep", lambda s: None)
+    svc = Thoth(mcp_launcher=None)
+    svc.init(str(repo))
+    svc.plan(str(repo), [{"title": "A", "agent": "codex"}, {"title": "B", "agent": "claude"}, {"title": "C", "agent": "claude"}])
+    brain = Brain.open(repo)
+    root = str(Path(repo).resolve())
+    runs = [brain.add_run(task_id=i, agent="codex", kind="build", prompt="x", actor="hermes") for i in (1, 2, 3)]
+    for r in runs:
+        brain.update_run(r["id"], status="running")
+    brief = lambda r, t: {"run": r["ref"], "kind": "build", "agent": "codex", "task": t, "title": t, "status": "done", "task_status": "built", "summary": "ok"}
+    p._bind_run(root, runs[0]["ref"])
+    p._bind_run(root, runs[1]["ref"])
+    brain.update_run(runs[0]["id"], status="done")
+    p._notify(root, brief(runs[0], "T1"))
+    assert ctx.injected == []  # R2 from the same chat is still running: hold the notice
+    brain.update_run(runs[1]["id"], status="done")
+    p._notify(root, brief(runs[1], "T2"))
+    assert len(ctx.injected) == 1 and "2 runs finished" in ctx.injected[0]
+    p._bind_run(root, runs[2]["ref"])
+    p._waiting[(root, runs[2]["ref"])] = 1  # a thoth_wait is about to report R3 itself
+    brain.update_run(runs[2]["id"], status="done")
+    p._notify(root, brief(runs[2], "T3"))
+    p._notify(root, brief(runs[2], "T3"))  # and a run started from the Thoth page (never bound) wakes nobody
+    assert len(ctx.injected) == 1
+
+
+def test_preview_serves_byte_ranges_for_media(tmp_path):
+    import urllib.request
+    from thoth_core import preview
+    (tmp_path / "clip.mp4").write_bytes(bytes(range(256)) * 4)
+    try:
+        port = preview.serve(tmp_path)
+        req = urllib.request.Request(f"http://127.0.0.1:{port}/clip.mp4", headers={"Range": "bytes=10-19"})
+        with urllib.request.urlopen(req, timeout=5) as r:
+            assert r.status == 206 and r.headers["Content-Range"] == "bytes 10-19/1024" and r.read() == bytes(range(10, 20))
+        req = urllib.request.Request(f"http://127.0.0.1:{port}/clip.mp4", headers={"Range": "bytes=-4"})
+        with urllib.request.urlopen(req, timeout=5) as r:
+            assert r.read() == bytes([252, 253, 254, 255])
+    finally:
+        preview.stop_all()
+
+
+def test_reach_shows_who_has_the_newest_work(repo):
+    import time as _time
+    from thoth_core import gitops
+    svc = Thoth(mcp_launcher=None)
+    svc.init(str(repo))
+    svc.plan(str(repo), [{"title": "API", "agent": "codex"}, {"title": "UI", "agent": "claude", "depends_on": [1]},
+                         {"title": "Docs", "agent": "claude", "depends_on": [1]}])
+    brain = Brain.open(repo)
+
+    def version(task_id, files, msg):
+        task = brain.task(task_id)
+        wt = Path(task["worktree"])
+        before = gitops.head(wt)
+        for name, text in files.items():
+            (wt / name).write_text(text)
+        sha = gitops.commit_all(wt, msg)
+        run = brain.add_run(task_id=task_id, agent=task["agent"], kind="build", prompt="x", actor="hermes")
+        brain.update_run(run["id"], status="done", commit_before=before, commit_after=sha)
+        brain.update_task(task_id, status="built", head_commit=sha)
+        return sha
+
+    svc._prepare_worktree(brain, brain.task(1))
+    version(1, {"api.py": "v = 1\n"}, "api v1")
+    svc._prepare_worktree(brain, brain.task(2))
+    version(2, {"ui.js": "ui\n"}, "ui on api v1")
+    assert [(e["agent"], e["task"], e["state"]) for e in svc.reach(brain)["T1"]] == [("claude", "T2", "ok")]
+    version(1, {"api.py": "v = 2\n"}, "api v2")          # Codex ships a newer API; Claude's UI is still on v1
+    t1 = svc.reach(brain)["T1"][0]
+    assert t1["agent"] == "claude" and t1["state"] == "behind" and t1["have"] == 1 and t1["latest"] == 2
+    svc.sync(str(repo), "T2")                            # Update brings v2 into the UI task
+    assert svc.reach(brain)["T1"][0]["state"] == "ok"  # T3 has not started: it will start from v2, so nothing is missing
+    _time.sleep(0.01)
+    brain.add_note(kind="decision", author="codex", body="Amounts are stored in cents", task_id=1)
+    assert svc.reach(brain)["T1"][0]["state"] == "notyet"  # Claude has open work and no run since that decision

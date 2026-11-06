@@ -8,13 +8,16 @@ from __future__ import annotations
 
 import logging
 import os
+import re
+import subprocess
 import sys
 import time
+import urllib.parse
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from . import gitops
+from . import gitops, preview
 from .agents import McpSpec, RunState, clean_env, driver_for
 from .brain import NOTE_KINDS, TASK_KINDS, OPEN_RUN_STATUSES, Brain, BrainError, find_brain_root, parse_id, rid, tid
 from .briefing import ago, board_lines, build_brief, parse_report, review_brief, strip_report
@@ -48,6 +51,10 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "env_passthrough": [],
     "notify_on_complete": True,
     "inject_board": True,
+    "link_dependencies": True,
+    "dependency_dirs": list(gitops.DEFAULT_DEPENDENCY_DIRS),
+    "copy_env_files": False,
+    "setup_timeout_seconds": 600,
 }
 
 Notifier = Callable[[str, dict[str, Any]], None]
@@ -94,8 +101,17 @@ class Thoth:
 
     # -- project -----------------------------------------------------------------
 
-    def init(self, project_dir: str, goal: str = "") -> dict:
-        root = gitops.repo_root(project_dir)
+    def init(self, project_dir: str, goal: str = "", setup: str | None = None, create: bool = False) -> dict:
+        folder = Path(project_dir).expanduser()
+        made = made_repo = False
+        if create and not folder.exists():
+            folder.mkdir(parents=True)
+            made = True
+        # A new project gets its own repository (also when the new folder sits inside another one).
+        if create and folder.is_dir() and (made or not gitops.git(folder, "rev-parse", "--show-toplevel", check=False)):
+            gitops.git(folder, "init", "-q")
+            made_repo = True
+        root = gitops.repo_root(folder)
         created_commit = False
         if not gitops.has_commits(root):
             gitops.ensure_initial_commit(root)
@@ -110,9 +126,13 @@ class Thoth:
         else:
             brain = Brain.create(root, goal=goal, base_branch=gitops.current_branch(root), actor=self.actor)
             existed = False
+        if setup is not None:
+            brain.set_meta("setup", setup.strip())
         brain.write_snapshot()
         result = self.status(str(root))
         result["initialized"] = not existed
+        if made_repo:
+            result["created"] = f"Made {'the folder and ' if made else ''}a new git repository at {root}."
         if created_commit:
             result["note"] = "The repository had no commits, so Thoth made an empty initial commit to branch from."
         return result
@@ -333,16 +353,57 @@ class Thoth:
                 unmerged.append(dep)
                 continue
             raise BrainError(f"{task['ref']} depends on {dep['ref']}, which is {dep['status']}; finish it first")
-        if len(unmerged) > 1:
-            raise BrainError(
-                f"{task['ref']} depends on several unmerged tasks ({', '.join(d['ref'] for d in unmerged)}); merge them first"
-            )
         if unmerged:
             base_ref = unmerged[0]["branch"]
         branch = f"thoth/{task['ref']}-{gitops.slugify(task['title'])}"
         worktree = brain.worktrees_dir / task["ref"]
         base_commit = gitops.create_worktree(brain.root, worktree, branch, base_ref)
+        # Several dependencies still on their own branches: start from the first and merge the others in,
+        # so every file the task builds on is in its worktree. The merge becomes the task's starting point,
+        # which keeps the dependencies' changes out of this task's diff and review.
+        for dep in unmerged[1:]:
+            ok, result = gitops.merge_into_worktree(worktree, dep["branch"], f"thoth: start {task['ref']} with {dep['ref']}'s work")
+            if not ok:
+                gitops.remove_worktree(brain.root, worktree)
+                gitops.delete_branch(brain.root, branch)
+                refs = ", ".join(d["ref"] for d in unmerged)
+                brain.add_note(kind="risk", author="thoth", body=f"{task['ref']} could not combine {refs}: {result}", task_id=task["id"])
+                raise BrainError(f"{task['ref']} builds on {refs}, but they change the same lines ({result}). "
+                                 f"Merge one of them first, or have its agent align it with the other.")
+            base_commit = gitops.head(worktree)
+        notes = []
+        if len(unmerged) > 1:
+            notes.append(f"Starts from {unmerged[0]['ref']} with {', '.join(d['ref'] for d in unmerged[1:])} merged in, so every dependency's files are here.")
+        notes += self._prepare_environment(brain, worktree)
+        if notes:
+            brain.add_note(kind="handoff", author="thoth", body=" ".join(notes), task_id=task["id"])
         return brain.update_task(task["id"], branch=branch, worktree=str(worktree), base_ref=base_ref, base_commit=base_commit, head_commit=base_commit)
+
+    def _prepare_environment(self, brain: Brain, worktree: Path) -> list[str]:
+        """Give a new worktree what a clean checkout lacks: the project's setup command, or links to its
+        dependency folders, and (when allowed) its .env files. Agents have no network to install them."""
+        notes: list[str] = []
+        setup = (brain.meta().get("setup") or "").strip()
+        if setup:
+            started = time.time()
+            try:
+                proc = subprocess.run(setup, shell=True, cwd=str(worktree), env=clean_env(self.settings.get("env_passthrough") or ()),
+                                      capture_output=True, text=True, timeout=int(self.settings.get("setup_timeout_seconds") or 600),
+                                      stdin=subprocess.DEVNULL)
+                ok, tail = proc.returncode == 0, (proc.stderr or proc.stdout or "").strip()[-300:]
+            except subprocess.TimeoutExpired:
+                ok, tail = False, "timed out"
+            took = round(time.time() - started)
+            notes.append(f"Setup `{setup}` ran in {took}s." if ok else f"Setup `{setup}` failed after {took}s: {tail}")
+        elif self.settings.get("link_dependencies", True):
+            linked = gitops.link_dependencies(brain.root, worktree, tuple(self.settings.get("dependency_dirs") or gitops.DEFAULT_DEPENDENCY_DIRS))
+            if linked:
+                notes.append(f"Linked from the main checkout (read-only for you, no network to reinstall): {', '.join(linked)}.")
+        if self.settings.get("copy_env_files"):
+            copied = gitops.copy_env_files(brain.root, worktree)
+            if copied:
+                notes.append(f"Copied {', '.join(copied)} from the main checkout.")
+        return notes
 
     def _launch(self, brain: Brain, run_id: int, task: dict, driver, *, kind: str, prompt: str, session: str, cwd: Path, model: str = "", effort: str = "") -> None:
         mcp = None
@@ -629,6 +690,45 @@ class Thoth:
         brain.event(self.actor, "synced", f"{current['ref']} now uses the newest {', '.join(merged)}", task_id=current["id"], commit=tip)
         return {"task": current["ref"], "updated": merged, "files": [f"{c['status']} {c['path']}" for c in changed[:20]]}
 
+    def preview(self, project_dir: str, task: Any = None) -> dict:
+        """Serve what a task built (or the main checkout) on localhost and return the link to open.
+
+        Agents cannot open browsers in their sandboxes and coordinators should not start servers of their
+        own, so this is the one way to look at a web page or a browser game a task made.
+        """
+        brain = self.open(project_dir)
+        current = brain.task(parse_id(task, "T")) if task not in (None, "", "main") else None
+        if current and current["worktree"] and Path(current["worktree"]).is_dir():
+            folder, what = Path(current["worktree"]), f"{current['ref']} {current['title']}"
+        else:
+            folder, what = brain.root, f"{brain.meta().get('base_branch') or 'main'}, with everything merged so far"
+        candidates: list[str] = []
+        if current:
+            for r in brain.runs(task_id=current["id"], limit=20):
+                f = r.get("files") or {}
+                candidates += [re.split(r"\s+[—–-]\s+", str(o))[0].strip() for o in f.get("outputs") or []]
+                candidates += [c["path"] for c in f.get("changed") or [] if c.get("status") != "D"]
+        page = preview.entry_page(folder, candidates)
+        if not page and not (folder / "index.html").is_file():
+            raise BrainError(f"{current['ref'] if current else 'The project'} has no web page to preview yet. Its files are in {folder}.")
+        port = preview.serve(folder)
+        return {"url": f"http://127.0.0.1:{port}/{page}", "what": what, "folder": str(folder), "page": page or "index.html"}
+
+    def output_url(self, project_dir: str, task: Any, path: str) -> dict:
+        """A link to one file a task produced (a video, a sound, a page, a PDF), for viewing it in place."""
+        brain = self.open(project_dir)
+        current = brain.task(parse_id(task, "T")) if task not in (None, "", "main") else None
+        folder = Path(current["worktree"]) if current and current["worktree"] and Path(current["worktree"]).is_dir() else brain.root
+        rel = Path(str(path or ""))
+        if not str(path or "").strip() or rel.is_absolute() or ".." in rel.parts or any(p.startswith(".") for p in rel.parts):
+            raise BrainError("Only files inside the task can be opened")
+        target = (folder / rel).resolve()
+        if not target.is_file() or folder.resolve() not in target.parents:
+            raise BrainError(f"{rel.as_posix()} is not in {current['ref'] if current else 'the project'} any more")
+        port = preview.serve(folder)
+        return {"url": f"http://127.0.0.1:{port}/{urllib.parse.quote(rel.as_posix())}", "folder": str(folder),
+                "path": rel.as_posix(), "bytes": target.stat().st_size}
+
     def merge(self, project_dir: str, task: Any, override: bool = False) -> dict:
         brain = self.open(project_dir)
         task_id = parse_id(task, "T")
@@ -841,6 +941,69 @@ class Thoth:
             "kept_out_tokens": max(0, (transcript_bytes - handed_bytes) // 4),
         }
 
+    def reach(self, brain: Brain, tasks: list[dict] | None = None) -> dict[str, list[dict]]:
+        """Which other agents have each task's newest work, per task ref.
+
+        One entry per agent that needs it: through a task that builds on it (``ok`` when that task
+        is built on the newest version, ``behind`` when on an older one, ``waiting`` when it has not
+        started and will start from the newest), or through a decision it recorded that an agent
+        with unfinished work has not received yet (``notyet``: no run of theirs started after it).
+        """
+        tasks = tasks if tasks is not None else brain.tasks()
+        runs = sorted(brain.runs(limit=500), key=lambda r: r["id"])
+        versions: dict[int, list[str]] = {}
+        for r in runs:
+            if r["kind"] == "build" and r["status"] == "done" and r["commit_after"] and r["commit_after"] != r["commit_before"]:
+                versions.setdefault(r["task_id"], []).append(r["commit_after"])
+        last_run: dict[str, float] = {}
+        for r in runs:
+            last_run[r["agent"]] = max(last_run.get(r["agent"], 0.0), float(r["created_at"] or 0))
+        busy = {t["agent"] for t in tasks if t["status"] not in ("merged", "cancelled")}
+        decisions = [n for n in brain.notes(kinds=("decision",), limit=200) if n.get("task_id")]
+        rank = {"behind": 3, "notyet": 2, "ok": 1, "waiting": 0}  # waiting is not a problem: it starts from the newest
+        out: dict[str, list[dict]] = {}
+        for x in tasks:
+            if x["status"] == "cancelled":
+                continue
+            vers, author, entries = versions.get(x["id"], []), x["agent"], {}
+
+            def keep(entry: dict) -> None:
+                old = entries.get(entry["agent"])
+                if old is None or rank[entry["state"]] > rank[old["state"]]:
+                    entries[entry["agent"]] = entry
+
+            for d in tasks:
+                if x["id"] not in d["depends_on"] or d["status"] == "cancelled" or d["agent"] == author:
+                    continue
+                if not d["branch"] or not d["head_commit"] or not vers:
+                    keep({"agent": d["agent"], "task": d["ref"], "state": "waiting" if not d["branch"] else "ok", "latest": len(vers)})
+                    continue
+                have = next((i + 1 for i in range(len(vers) - 1, -1, -1) if self._has(brain.root, vers[i], d["head_commit"])), 0)
+                keep({"agent": d["agent"], "task": d["ref"], "state": "ok" if have == len(vers) else "behind", "have": have, "latest": len(vers)})
+            for n in decisions:
+                if n["task_id"] != x["id"]:
+                    continue
+                for agent in busy - {author}:
+                    if last_run.get(agent, 0.0) < float(n["created_at"] or 0):
+                        keep({"agent": agent, "state": "notyet", "note": n["body"][:120]})
+                    elif agent not in entries:
+                        keep({"agent": agent, "state": "ok", "note": n["body"][:120]})
+            if entries:
+                out[x["ref"]] = list(entries.values())
+        return out
+
+    _ancestry: dict[tuple[str, str, str], bool] = {}
+
+    @classmethod
+    def _has(cls, root: Path, commit: str, tip: str) -> bool:
+        """Is ``commit`` part of ``tip``'s history? Commits never change, so answers are cached."""
+        key = (str(root), commit, tip)
+        if key not in cls._ancestry:
+            if len(cls._ancestry) > 5000:
+                cls._ancestry.clear()
+            cls._ancestry[key] = commit == tip or gitops.is_ancestor(root, commit, tip)
+        return cls._ancestry[key]
+
     def snapshot(self, project_dir: str) -> dict:
         """Everything a dashboard needs in one call."""
         brain = self.open(project_dir)
@@ -848,6 +1011,7 @@ class Thoth:
         tasks = brain.tasks()
         runs = brain.runs(limit=60)
         return {
+            "reach": self.reach(brain, tasks),
             "project": str(brain.root),
             "meta": meta,
             "tasks": tasks,

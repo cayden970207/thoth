@@ -97,7 +97,40 @@ Hermes will call the Thoth tools; you approve each agent launch and each merge.
 | `thoth_merge` | Merge a task branch into the base branch (**needs your approval**) |
 | `thoth_status` / `thoth_context` | Board, live progress, decisions; full brief for a task |
 | `thoth_note` | Record a decision / handoff / risk / question for every agent |
+| `thoth_preview` | Open what a task built (a web page, a browser game) in your browser, served read-only on localhost |
+| `thoth_revise`, `thoth_restore`, `thoth_sync` | Send work back with feedback, bring back an earlier version, pull a dependency's newer version |
 | `thoth_cancel`, `thoth_update_task`, `thoth_coordinator` | Stop a run, edit a task, hand over coordination |
+
+For a brand-new project, ask for one: Hermes calls `thoth_init(create=true)` and Thoth makes the folder
+and its git repository. A task that depends on several unfinished tasks starts with all of their work
+merged into its branch.
+
+**Seeing the result.** Agents cannot open a browser inside their sandbox, so every task that made a web
+page or a browser game gets an **Open preview** button on the Thoth page (and Hermes has
+`thoth_preview`). Thoth serves that task's folder on `127.0.0.1`, read-only, never hidden files such
+as `.env`. The **Outputs** view collects everything the team made that you can look at — images, video, sound,
+web pages and documents — and plays or shows each one in place. On the canvas, shipped work folds into
+the Main card once there is more than a little of it, so a long project stays readable.
+
+**Dependencies.** A task worktree is a clean checkout, and the agents' sandboxes have no network, so they
+cannot reinstall packages. Thoth links ignored `node_modules`, `.venv` and `venv` folders from your main
+checkout into each new worktree (agents can read them, not change them; the links are excluded from git).
+For a full install per task, give the project a setup command — `thoth_init(setup="npm ci")` — which
+Thoth runs in each new worktree before the agent starts, outside the sandbox and only after you approve
+it. `copy_env_files: true` also copies ignored `.env` files.
+
+**Hearing back in chat.** When an agent finishes, Thoth can tell the chat that started it, with one
+message for a batch of runs and nothing for results `thoth_wait` already returned. Hermes keeps this off
+until you allow it for Thoth:
+
+```yaml
+plugins:
+  entries:
+    thoth:
+      allow_gateway_injection: true
+```
+
+Without it Hermes learns about finished runs through `thoth_wait`, and the Thoth page shows them anyway.
 
 Slash command: `/thoth [status | task T1 | cancel R1 | coordinator claude|codex|hermes | brain | doctor]`.
 
@@ -161,6 +194,13 @@ environment passthrough.
   you approve a merge. In a repository with no commits it makes one empty initial commit.
 - **Background processes**: runs continue after the tool call returns, up to the timeout; they are
   killed (whole process group) on cancel, timeout, plugin unload and Hermes exit.
+- **Previews**: when you (or Hermes) open a preview, a static file server listens on `127.0.0.1` on a
+  free port for that task's folder, inside the Hermes process. It only answers GET/HEAD and never serves
+  hidden paths. At most 8 run at once.
+- **Worktree setup**: links ignored dependency folders (`node_modules`, `.venv`, `venv`) from your main
+  checkout into new worktrees and adds exact-path lines for them to `.git/info/exclude`; with
+  `copy_env_files` it copies ignored `.env` files; with a project setup command (approved by you) it runs
+  that command in the new worktree as you, with network access.
 - No network calls of its own, no telemetry, no credential reads, no self-updating code.
 
 ## Development

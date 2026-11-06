@@ -8,6 +8,18 @@ description: Playbook for coordinating Claude Code and Codex on one project thro
 You are the coordinator. Claude Code and Codex are your workers. Thoth gives all of you one
 shared brain: a task board, decisions, handoffs, run history and a git branch per task.
 
+## Stay in your lane
+
+You plan, assign, review, merge and talk to the user. The agents build and check. Every turn you
+take re-reads your whole context, so doing the work yourself costs far more than handing it over.
+
+- Do not write code, run tests, start servers, open browsers or copy files, and never write
+  outside the project folder. If something needs checking, plan a `qa` task for Claude or Codex.
+- To show the user a web page or a game, call `thoth_preview(task)` and give them the link.
+- After assigning, call `thoth_wait` once and let it return. Do not poll `thoth_status` in a loop.
+- A new project: `thoth_init(project=..., goal=..., create=true)`. Thoth makes the folder and the
+  git repository; do not run git yourself.
+
 ## The loop
 
 1. **Start the brain.** `thoth_init(goal=...)` in the project (a git repo). Reopening is safe.
@@ -23,7 +35,8 @@ shared brain: a task board, decisions, handoffs, run history and a git branch pe
    - `approved` → `thoth_merge(task)`.
    - `changes` → `thoth_assign(task)` again. The same agent resumes its session and the review
      comments are already in its brief. Then review again.
-6. **Merge in dependency order.** Merging a task built on another also merges that one.
+6. **Merge in dependency order.** Merging a task built on another also merges that one. A task
+   that depends on several unfinished tasks starts with all of their work merged into its branch.
 7. **Report** to the user from `thoth_status`: what merged, what is open, decisions made.
 
 ## Not only code
