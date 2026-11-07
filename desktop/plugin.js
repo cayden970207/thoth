@@ -270,6 +270,7 @@ const ICONS = {
   keys: 'M3 6.5h18v11H3zM7 10.5h.01M11 10.5h.01M15 10.5h.01M8 14h8',
   alert: 'M12 4l9 16H3zM12 10v4M12 17h.01',
   play: 'M8 5.5v13l10.5-6.5z',
+  pause: 'M9 5.5v13M15 5.5v13',
   arrowr: 'M5 12h14M13 6l6 6-6 6',
   back: 'M15 18l-6-6 6-6',
   up: 'M6 15l6-6 6 6',
@@ -356,6 +357,9 @@ function cardMeta (t, tk, d) {
 }
 const Mini = ({ agent, size = 20 }) => h('span', { className: 'th-mini th-mini-' + agent, style: { width: size, height: size }, title: AGENTS[agent].name }, h(Logo, { agent, size }))
 const ago = ts => { const s = Math.max(0, Math.round(Date.now() / 1000 - ts)); return s < 10 ? 'just now' : s < 60 ? s + 's ago' : s < 3600 ? Math.round(s / 60) + 'm ago' : Math.round(s / 3600) + 'h ago' }
+// How long until a time, as short as it can be read ("45m", "1h 29m", "13h", "5d"), and the time itself ("Thu 20:00").
+const soon = ts => { const s = Math.max(60, ts - Date.now() / 1000); return s < 3600 ? Math.round(s / 60) + 'm' : s < 3 * 3600 ? Math.floor(s / 3600) + 'h ' + Math.floor(s % 3600 / 60) + 'm' : s < 86400 ? Math.round(s / 3600) + 'h' : Math.round(s / 86400) + 'd' }
+const clockAt = ts => new Date(ts * 1000).toLocaleString(undefined, { weekday: 'short', hour: '2-digit', minute: '2-digit' })
 const short = s => (s || '').slice(0, 7)
 // "claude reviewed T1" from actor claude reads "Claude Code reviewed T1": drop the repeated key, use real names.
 const prettyEvent = (msg, actor) => String(msg || '').replace(new RegExp('^' + actor + '\\s+', 'i'), '').replace(/\b(claude|codex|hermes)\b(?!\.|\/|-)/g, k => AGENTS[k].name)
@@ -522,6 +526,7 @@ function Roster ({ snap }) {
   const coord = snap.meta.coordinator || 'hermes'
   const order = [coord, ...['claude', 'codex', 'hermes'].filter(a => a !== coord)]
   const said = (snap.events || []).filter(e => e.actor === 'hermes')
+  const plans = snap.plans  // absent when plan usage is turned off
   const line = a => {
     const w = (snap.workers || {})[a]
     if (w && !w.ready) return { off: true, text: w.why === 'not signed in' ? `Not signed in here · ${w.hint}` : `Not installed on this machine` }
@@ -543,7 +548,66 @@ function Roster ({ snap }) {
         h('b', null, AGENTS[a].name, a === coord ? h('em', null, 'coordinator') : null),
         h('span', { className: 'th-twhat' + (l.live ? ' th-live' : ''), title: l.text }, l.live ? h('i', { className: 'th-pulse' }) : null, h('span', null, l.text)),
         h('span', { className: 'th-tn' }, n ? plural(n, 'action') : ''))
-    }))
+    }),
+    plans ? h(PlanUsage, { plans, workers: snap.workers || {} }) : null)
+}
+
+// Plan usage, under the team: one quiet line per agent (one per window when it reports two). Blue on a lighter
+// blue track; amber when a plan runs low and red at its limit, with the words said once, above the lines or in
+// the relay strip below them. The exact reset time and how old the numbers are sit in each line's tooltip.
+function PlanUsage ({ plans, workers }) {
+  const agents = ['claude', 'codex'].filter(a => !(workers[a] && !workers[a].ready))
+  if (!agents.length) return null
+  const out = agents.filter(a => plans[a] && plans[a].limited_until)
+  const low = agents.filter(a => plans[a] && !plans[a].limited_until && plans[a].level === 'low')
+  const gone = out.length === 1 ? out[0] : '', cover = gone === 'claude' ? 'codex' : gone === 'codex' ? 'claude' : ''
+  const rows = []
+  for (const a of agents) {
+    const v = plans[a], name = AGENTS[a].name
+    if (!v || (!v.windows.length && !v.limited_until)) {
+      rows.push(h(PlanRow, { key: a, agent: a, label: 'Plan', tone: 'wait', note: a === 'claude' ? 'after its next run' : 'checking…',
+        tip: a === 'claude' ? `${name}'s plan usage shows after its next run` : `Checking ${name}'s plan…` }))
+      continue
+    }
+    const src = v.source === 'run' ? `from a ${name} run ${ago(v.seen_at)}` : `checked ${ago(v.seen_at)}`
+    if (v.limited_until) {
+      rows.push(h(PlanRow, { key: a, agent: a, label: (v.windows[0] || {}).label || 'Plan', tone: 'spent', used: 1,
+        value: 'Back in ' + soon(v.limited_until), tip: `${name} has hit its plan limit. It's back ${clockAt(v.limited_until)} · ${src}` }))
+      continue
+    }
+    const stale = v.source === 'run' && Date.now() / 1000 - (v.seen_at || 0) > 3 * 3600
+    v.windows.forEach((w, i) => {
+      const pct = Math.round(w.used * 100), isLow = w.used >= 0.85
+      rows.push(h(PlanRow, { key: a + (w.id || i), agent: i ? '' : a, label: w.label, tone: isLow ? 'low' : 'ok', used: w.used,
+        value: w.rolled ? '' : (stale ? '≈' : '') + pct + '%',
+        note: w.rolled ? 'reset since' : w.resets_at ? 'resets in ' + soon(w.resets_at) : '',
+        tip: `${name}, ${w.label.toLowerCase()} limit: ${pct}% used${isLow ? ', running low' : ''}` +
+          (w.resets_at ? ` · resets ${clockAt(w.resets_at)}` : w.rolled ? ' · it has reset since' : '') +
+          (w.elapsed != null ? ` · ${Math.round(w.elapsed * 100)}% of this window has passed` : '') + ` · ${src}` }))
+    })
+  }
+  const lowText = low.length > 1 ? 'Both plans are running low' : low.length ? `${AGENTS[low[0]].name} is running low` : ''
+  return h('div', { className: 'th-plans' },
+    h('div', { className: 'th-plans-hd' }, h('span', null, 'Plan usage'),
+      lowText && !gone ? h('span', { className: 'th-plans-low' }, h(Icon, { name: 'alert', size: 12 }), h('span', null, lowText)) : null),
+    h('div', { className: 'th-plans-rows' }, rows),
+    cover && agents.includes(cover) ? h(Relay, { gone, cover, until: plans[gone].limited_until }) : null)
+}
+
+function PlanRow ({ agent, label, tone, used = 0, tip, value, note }) {
+  const pct = Math.round(used * 100)
+  return h('div', { className: 'th-pr th-pr-' + tone, title: tip },
+    h('span', { className: 'th-pr-who' }, agent ? h(Mini, { agent, size: 16 }) : h('i'), h('span', null, label)),
+    h('span', { className: 'th-meter', role: 'meter', 'aria-valuemin': 0, 'aria-valuemax': 100, 'aria-valuenow': pct, 'aria-label': tip },
+      tone === 'wait' ? null : h('i', { style: { width: (pct ? Math.max(3, pct) : 0) + '%' } })),
+    h('span', { className: 'th-pr-val' }, value ? h('b', null, value) : null, note ? h('span', null, note) : null))
+}
+
+// One plan is out: the other agent takes its tasks and reviews until it is back.
+function Relay ({ gone, cover, until }) {
+  const text = `${AGENTS[cover].name} covers for ${AGENTS[gone].name} until it's back`
+  return h('div', { className: 'th-relay', title: `${AGENTS[gone].name} is out of plan until ${clockAt(until)}. Hermes gives its tasks and reviews to ${AGENTS[cover].name} meanwhile.` },
+    h(Mini, { agent: gone, size: 18 }), h(Icon, { name: 'arrowr', size: 13 }), h(Mini, { agent: cover, size: 18 }), h('span', null, text))
 }
 
 function NeedsWidget ({ snap, d, select }) {
@@ -600,9 +664,11 @@ function TokenRow ({ usage }) {
 }
 
 function NeedRow ({ n, select, next, inline = false, rich = false, d, snap }) {
-  const label = { merge: 'Merge', fix: 'Send back', review: 'Review', retry: 'Retry', conflict: 'Fix', decide: 'Merge as is', sync: 'Update' }[n.kind] || 'Open'
+  const label = { merge: 'Merge', fix: 'Send back', review: 'Review', retry: 'Retry', conflict: 'Fix', decide: 'Merge as is', sync: 'Update',
+    relay: 'Give to ' + ((AGENTS[n.agent] || {}).name || 'the other agent') }[n.kind] || 'Open'
   const run = () => {
     select(n.task)
+    if (n.kind === 'relay') return act({ action: 'assign', task: n.task, agent: n.agent }, r => `${AGENTS[r.agent].name} carries on with ${n.task}`)
     if (n.kind === 'merge' || n.kind === 'decide') return act({ action: 'merge', task: n.task, override: n.kind === 'decide' }, r => `Merged ${n.task} into ${r.merged_into} · ${r.commit.slice(0, 7)}`)
     if (n.kind === 'review') return act({ action: 'review', task: n.task }, r => `${AGENTS[r.reviewer].name} is reviewing ${n.task}`)
     if (n.kind === 'sync') return act({ action: 'sync', task: n.task }, r => r.updated.length ? `${n.task} now uses the newest ${r.updated.join(', ')}` : r.message)
@@ -1393,7 +1459,7 @@ function TeamDots ({ snap }) {
   const busy = order.filter(a => agents[a] && agents[a].busy)
   const label = (busy.length ? busy.map(a => AGENTS[a].name).join(' and ') + (busy.length > 1 ? ' are' : ' is') + ' working. ' : '') + 'Open Team & brain'
   return h('button', { className: 'th-teamdots', onClick: showTeam, title: label, 'aria-label': label },
-    h('span', { className: 'th-teamstack' }, order.map(a => h('span', { key: a, className: 'th-tdot' + (agents[a] && agents[a].busy ? ' th-busy' : '') + (workers[a] && !workers[a].ready ? ' th-tdot-off' : ''), style: { '--c': AGENTS[a].color } }, h(Mini, { agent: a, size: 22 })))),
+    h('span', { className: 'th-teamstack' }, order.map(a => h('span', { key: a, className: 'th-tdot' + (agents[a] && agents[a].busy ? ' th-busy' : '') + (workers[a] && !workers[a].ready ? ' th-tdot-off' : '') + (snap.plans && snap.plans[a] && snap.plans[a].limited_until ? ' th-tdot-out' : ''), style: { '--c': AGENTS[a].color } }, h(Mini, { agent: a, size: 22 })))),
     busy.length ? h('span', { className: 'th-teamlive', style: { '--c': AGENTS[busy[0]].color } }, h('i', { className: 'th-pulse' }), busy.length + ' working') : null)
 }
 
@@ -2554,6 +2620,7 @@ textarea.th-cmd-input{resize:none;line-height:1.45;padding:4px 0;max-height:120p
 --th-iris:linear-gradient(125deg,#FF9AD5 0%,#C9A3FF 30%,#8DB4FF 62%,#7FE3CF 100%);
 --th-amber:#F0A63A;--th-amber-bg:#FFF4E0;--th-amber-tx:#8F5D0C;--th-blue:#3478F6;--th-blue-bg:#EAF1FF;--th-blue-tx:#2458C2;
 --th-green:#22A366;--th-green-bg:#E7F6EE;--th-green-tx:#167A4B;--th-gray-bg:#F0F0F3;--th-ring-track:#ECECF0;
+--th-red:#E5484D;--th-red-bg:#FDEBEC;--th-red-tx:#B42318;
 --th-edge:#CBD2DE;--th-port:#B5BECD;--th-select:#8DB4FF;--th-dot:rgba(23,23,28,.11);background:var(--th-bg)}
 .dark .th-root{--th-bg:#0F0F12;--th-panel:#1B1B20;--th-sunken:#151519;--th-hover:rgba(255,255,255,.06);
 --th-text:#F3F3F6;--th-t2:#B5B5BF;--th-t3:#84848E;--th-t4:#5D5D66;--th-line:rgba(255,255,255,.07);--th-line2:rgba(255,255,255,.12);
@@ -2561,6 +2628,7 @@ textarea.th-cmd-input{resize:none;line-height:1.45;padding:4px 0;max-height:120p
 --th-lift:0 0 0 1px rgba(255,255,255,.08),0 4px 10px -2px rgba(0,0,0,.35),0 26px 50px -20px rgba(0,0,0,.7);
 --th-amber-bg:rgba(240,166,58,.16);--th-amber-tx:#F5C27A;--th-blue-bg:rgba(52,120,246,.2);--th-blue-tx:#9DBDFF;
 --th-green-bg:rgba(34,163,102,.2);--th-green-tx:#79D6A6;--th-gray-bg:rgba(255,255,255,.07);--th-ring-track:rgba(255,255,255,.1);
+--th-red-bg:rgba(229,72,77,.2);--th-red-tx:#FF9592;
 --th-edge:#3A3F4B;--th-port:#4B5161;--th-dot:rgba(255,255,255,.09)}
 .th-root button:focus-visible{outline:2px solid var(--th-select);outline-offset:2px}
 .th-root .th-card{border-radius:24px;border:0;box-shadow:var(--th-shadow);background:var(--th-panel)}
@@ -2671,6 +2739,28 @@ textarea.th-cmd-input{resize:none;line-height:1.45;padding:4px 0;max-height:120p
 .th-trow{display:grid;grid-template-columns:22px 150px minmax(0,1fr) auto;align-items:center;gap:12px;height:34px}
 .th-trow b{display:flex;align-items:baseline;gap:6px;font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden}
 .th-trow b em{font-style:normal;font-weight:400;font-size:11.5px;color:var(--th-t3)}
+/* Plan usage, under the team: blue on a lighter blue track; amber when low; red at the limit. */
+.th-plans{display:flex;flex-direction:column;gap:9px;margin-top:10px;padding-top:12px;border-top:1px solid var(--th-line)}
+.th-plans-hd{display:flex;align-items:center;justify-content:space-between;gap:10px;font-size:12px;font-weight:600;color:var(--th-t3)}
+.th-plans-low{display:inline-flex;align-items:center;gap:5px;min-width:0;font-weight:500;color:var(--th-amber-tx)}
+.th-plans-low>svg{flex-shrink:0}.th-plans-low>span{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.th-plans-rows{display:grid;grid-template-columns:auto minmax(48px,1fr) auto;column-gap:14px;row-gap:9px}
+.th-pr{display:grid;grid-column:1/-1;grid-template-columns:84px minmax(48px,1fr) auto;grid-template-columns:subgrid;align-items:center;min-height:20px;font-size:12px;color:var(--th-t3)}
+.th-pr-who{display:inline-flex;align-items:center;gap:8px;min-width:0;white-space:nowrap}
+.th-pr-who>i{width:16px;flex-shrink:0}.th-pr-who>span{overflow:hidden;text-overflow:ellipsis}
+.th-pr-val{display:inline-flex;align-items:center;gap:6px;white-space:nowrap;font-variant-numeric:tabular-nums}
+.th-pr-val>b{font-weight:600;font-size:12.5px;color:var(--th-text)}
+.th-pr-val>span{color:var(--th-t3)}
+.th-meter{position:relative;height:6px;border-radius:99px;background:var(--th-blue-bg)}
+.th-meter>i{position:absolute;left:0;top:0;bottom:0;border-radius:99px;background:var(--th-blue);transition:width .5s cubic-bezier(.2,.7,.2,1)}
+.th-pr-wait .th-meter{background:var(--th-gray-bg)}
+.th-pr-low .th-meter{background:var(--th-amber-bg)}.th-pr-low .th-meter>i{background:var(--th-amber)}.th-pr-low .th-pr-val{color:var(--th-amber-tx)}.th-pr-low .th-pr-val>b{color:var(--th-amber-tx)}
+.th-pr-spent .th-meter{background:var(--th-red-bg)}.th-pr-spent .th-meter>i{background:var(--th-red)}.th-pr-spent .th-pr-val,.th-pr-spent .th-pr-val>b{color:var(--th-red-tx)}
+.th-relay{display:flex;align-items:center;gap:6px;margin-top:1px;padding:8px 10px;border-radius:12px;background:var(--th-sunken);font-size:12px;color:var(--th-t2)}
+.th-relay>svg{color:var(--th-t3);flex-shrink:0}.th-relay .th-mini{flex-shrink:0}
+.th-relay>span{margin-left:4px;min-width:0;line-height:1.35}
+.th-tdot.th-tdot-out .th-mini{opacity:.45;filter:grayscale(1)}
+@media (prefers-reduced-motion:reduce){.th-meter>i{transition:none}}
 .th-twhat{display:flex;align-items:center;gap:8px;min-width:0;font-size:12.5px;color:var(--th-t2)}
 .th-twhat>span{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .th-twhat.th-live{color:var(--th-text)}

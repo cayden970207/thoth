@@ -48,6 +48,7 @@ harness onto the same board, such as Grok Bot, Muse, Antigravity and DeepSeek Ha
 | One agent checks its own work | **Cross-review**: the other agent reviews the diff read-only and returns approve/changes with comments. Re-assigning a task resumes the original agent's session with the review comments in its brief. |
 | Stuck with one coordinator | `thoth_coordinator` hands the coordinator role to Claude Code or Codex; they drive the same board through the Thoth MCP server. |
 | Agents can't look at the web | A task can get a **browser**: a clean Chrome without your logins, or your own Chrome when it needs your logins. See [Looking at the web](#looking-at-the-web). |
+| A plan runs out mid-project | **Plan relay**: the Team card shows how much of your Claude and ChatGPT plans is used and when each resets. When one runs out, the other agent carries on from its work (one click on **Give to Codex**, or Claude), and Hermes gives new work to the agent with room. |
 
 ## Not only code
 
@@ -335,6 +336,12 @@ environment passthrough.
   your logins, and is told to only look in a tab of its own. The browser tools are pre-approved inside that
   run (`codex exec` cannot ask), which the run's approval card covers; an "always allow" for runs without a
   browser never covers runs with one. Reviews never get a browser.
+- **Plan usage** (setting `plan_usage`, on by default): Thoth reads what Claude Code reports about your plan
+  in each run's output (how much of the 5-hour or weekly limit is used, and when it resets), and asks
+  Codex's own app server for Codex's (`codex app-server`, the `account/rateLimits/read` call, which uses no
+  tokens) after Codex runs and at most every ten minutes while the Thoth page is open. Both CLIs answer with
+  their own logins. The latest numbers are kept in the plugin's data folder (`plans.json`). While a plan is
+  out, Thoth won't start that agent and names the other one instead.
 - No network calls of its own (the browser package above is fetched by npx when a task first browses), no
   telemetry, no credential reads, no self-updating code.
 

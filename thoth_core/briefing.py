@@ -8,8 +8,11 @@ agent ends with, so its decisions flow back into the brain for the next agent.
 
 from __future__ import annotations
 
+import functools
 import json
 import re
+import shutil
+import subprocess
 import time
 from typing import TYPE_CHECKING, Any
 
@@ -114,7 +117,7 @@ def _report_instructions(kind: str) -> str:
 
 
 KIND_GUIDE = {
-    "code": "Write working code and verify it by running it where you can.",
+    "code": "Write working code and check that it runs.",
     "asset": (
         "This is an asset task: produce the files themselves (images, sprites, audio, data). Put them under "
         "`assets/` unless the task names another place, use clear file names, and keep them at the sizes the task asks for. "
@@ -126,6 +129,81 @@ KIND_GUIDE = {
     "design": "This is a design task: produce the design files (specs, mockups, style guides) the builders will follow.",
     "qa": "This is a QA task: exercise the product, write what you found to `notes/qa.md`, and fix nothing unless asked.",
 }
+
+
+_TOOLS = (("node", "node"), ("python3", "python3"), ("magick", "ImageMagick (magick)"), ("ffmpeg", "ffmpeg"))
+
+
+@functools.lru_cache(maxsize=1)
+def installed_tools() -> str:
+    """Common tools on PATH (agents inherit it), so an agent need not spend steps probing for them."""
+    found = []
+    for cmd, label in _TOOLS:
+        path = shutil.which(cmd)
+        if not path:
+            continue
+        if cmd == "python3":
+            try:
+                pil = subprocess.run([path, "-c", "import PIL"], capture_output=True, timeout=5, stdin=subprocess.DEVNULL).returncode == 0
+            except (OSError, subprocess.SubprocessError):
+                pil = False
+            label += " with Pillow" if pil else ""
+        found.append(label)
+    return ", ".join(found)
+
+
+def _qa_after(brain: "Brain", task: dict) -> dict | None:
+    """An open qa task that builds on this one, directly or through other tasks."""
+    tasks = {t["id"]: t for t in brain.tasks()}
+    for t in tasks.values():
+        if t.get("kind") != "qa" or t["id"] == task["id"] or t["status"] in ("merged", "cancelled"):
+            continue
+        seen: set[int] = set()
+        stack = list(t.get("depends_on") or [])
+        while stack:
+            d = stack.pop()
+            if d == task["id"]:
+                return t
+            if d not in seen and d in tasks:
+                seen.add(d)
+                stack.extend(tasks[d].get("depends_on") or [])
+    return None
+
+
+def _work_section(brain: "Brain", task: dict, *, agent: str, kind: str, browser: str) -> str:
+    """How to spend the run well. Every line answers something agents lost time on in real runs."""
+    lines = []
+    if kind == "qa":
+        lines.append("- Try what the task lists the way a person would use the product, and write it up briefly. Don't build a "
+                     "test framework for it; a few screenshots are enough evidence.")
+    else:
+        lines.append("- Do what the task asks, then stop. Don't add features, files or docs it doesn't ask for; add tests only "
+                     "when the task asks or the project already keeps tests for that code.")
+        lines.append("- Check your work with the quickest thing that proves it: the project's own tests, a syntax check or a "
+                     "short script. Build a test harness or browser runner only when the task asks for one.")
+        qa = _qa_after(brain, task)
+        if qa:
+            lines.append(f"- {qa['ref']} tests the whole product after you (QA), so leave thorough testing to it.")
+    tools = installed_tools()
+    have = f" On PATH: {tools}." if tools else ""
+    if browser:
+        if have:
+            lines.append("-" + have)
+    else:
+        lines.append("- Your shell has no network, so installs, downloads and web requests fail: work with what is here." + have)
+        lines.append("- There is no browser in this run, so don't launch Chrome yourself; what only a browser can check goes "
+                     "under `limits`.")
+    scratch = ("- Keep throwaway files (scratch scripts, logs) in `.thoth/scratch/` in your worktree: git ignores it, so they "
+               "stay out of your work.")
+    if agent == "claude":
+        scratch += " Writing anywhere outside the worktree, /tmp and $TMPDIR included, is refused."
+    lines.append(scratch)
+    if agent == "claude":
+        lines.append("- Claude Code refuses any shell command it can't check up front, and nobody is here to approve one. So create "
+                     "and edit files with Write and Edit (not heredocs, `cat >` or `sed -i`), keep Bash calls to plain commands "
+                     "without `$VARIABLES`, `$(…)`, loops or `cd`, and put anything longer in a script under `.thoth/scratch/`.")
+    lines.append("- If something can't be done or checked here, put it under `limits` and finish rather than working around it.")
+    return "## How to work here\n" + "\n".join(lines)
 
 
 def _dep_files(brain: "Brain", dep_id: int) -> list[str]:
@@ -171,6 +249,8 @@ def build_brief(brain: "Brain", task: dict, *, agent: str, instructions: str = "
         f"(based on `{task['base_ref']}` @ {task['base_commit'][:7]}). Work only inside it and do not switch branches. "
         "Thoth commits whatever you leave in the worktree when you finish, so you do not have to commit."
     )
+    if not self_run:
+        parts.append(_work_section(brain, task, agent=agent, kind=kind, browser=browser))
     if not resumed:
         parts.append("## Team board\n" + "\n".join(board_lines(brain)))
     decisions = brain.notes(kinds=("decision",), limit=MAX_BRIEF_NOTES)

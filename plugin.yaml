@@ -1,5 +1,5 @@
 name: thoth
-version: 0.6.2
+version: 0.7.0
 manifest_version: 2
 api_version: 1
 description: >-
@@ -139,3 +139,8 @@ config_schema:
     default: []
     label: Environment variables to pass to agents
     description: Thoth strips API keys, tokens and Hermes variables from the agents' environment; list names to keep.
+  plan_usage:
+    type: bool
+    default: true
+    label: Watch your Claude and Codex plan usage
+    description: Shows how much of each plan is used and hands work to the other agent when one runs out. Claude Code reports it in each run's output; Thoth asks `codex app-server` for Codex's limits, a read that uses no tokens.

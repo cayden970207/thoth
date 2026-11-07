@@ -26,6 +26,8 @@ import shutil
 from dataclasses import dataclass, field
 from typing import Any
 
+from . import plans
+
 # Environment variables that must not leak from the host into an agent CLI:
 # provider keys and tokens (agents use their own logins), Hermes internals, and
 # variables set by a parent Claude Code / Agent SDK process that would make a
@@ -76,6 +78,16 @@ class RunState:
     files_written: list[str] = field(default_factory=list)
     # Sub-agents the agent delegated to: {id, role, title, status, activity, last, started, ended}
     delegations: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # The agent's plan as the run reported it (see plans.py), and whether the run stopped because it ran out.
+    plan: dict[str, Any] = field(default_factory=dict)
+    plan_limit: bool = False
+    plan_reset: int | None = None
+
+    def saw_limit(self, text: str) -> None:
+        hit, reset = plans.limit_in(text)
+        if hit:
+            self.plan_limit = True
+            self.plan_reset = reset or self.plan_reset
 
     def rel(self, path: str) -> str:
         """A path relative to the run's worktree, or "" for anything outside it."""
@@ -90,8 +102,8 @@ class RunState:
             path = os.path.relpath(full, root)
         while path.startswith("./"):
             path = path[2:]
-        if path.startswith("../") or path.startswith(".git/") or path in (".git", ".", ""):
-            return ""
+        if path.startswith(("../", ".git/", ".thoth/")) or path in (".git", ".thoth", ".", ""):
+            return ""  # outside the work, git's own, or Thoth's scratch space
         return path
 
     def saw_read(self, path: str) -> None:
@@ -284,7 +296,10 @@ class ClaudeDriver(Driver):
         etype = event.get("type")
         if event.get("session_id") and not state.session_id:
             state.session_id = str(event["session_id"])
-        if etype == "system" and event.get("subtype") == "api_retry":
+        if etype == "rate_limit_event":
+            if isinstance(event.get("rate_limit_info"), dict):
+                state.plan = plans.from_claude(event["rate_limit_info"])
+        elif etype == "system" and event.get("subtype") == "api_retry":
             state.progress = f"retrying API call ({event.get('error') or event.get('error_status')})"
         elif etype == "system" and event.get("subtype", "").startswith("task_") and event.get("tool_use_id"):
             # Sub-agent lifecycle: task_started / task_progress / task_updated / task_notification
@@ -330,6 +345,7 @@ class ClaudeDriver(Driver):
             state.is_error = bool(event.get("is_error"))
             if state.is_error:
                 state.error = _short(state.final_text, 400)
+                state.saw_limit(state.final_text)
             usage = event.get("usage") or {}
             fresh = int(usage.get("input_tokens") or 0)
             written = int(usage.get("cache_creation_input_tokens") or 0)
@@ -484,6 +500,7 @@ class CodexDriver(Driver):
             message = err.get("message") if isinstance(err, dict) else event.get("message")
             state.is_error = True
             state.error = _short(str(message or "Codex reported an error"), 400)
+            state.saw_limit(str(message or ""))
 
 
 _PATH_TOKEN = re.compile(r"(?<![\w/.-])((?:\.{0,2}/)?[\w@.-]+(?:/[\w@.-]+)*\.[A-Za-z0-9]{1,8})(?![\w/])")

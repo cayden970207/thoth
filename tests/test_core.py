@@ -816,3 +816,151 @@ def test_partial_runs_go_to_review_with_their_limits_and_blocked_ones_say_why(re
     assert need["title"] == "T2 is blocked" and "does not exist" in need["detail"]
     # the brief offers the middle way
     assert "partial" in build_brief(brain, brain.task(1), agent="codex")
+
+
+def test_briefs_size_the_work_and_say_what_the_sandbox_refuses(repo):
+    # What agents lost time on in real runs: test harnesses nobody needed, refused commands, writes to /tmp,
+    # launching Chrome without a browser, and fighting browser tools that have no touch input.
+    svc = Thoth(mcp_launcher=None)
+    svc.init(str(repo))
+    svc.plan(str(repo), [
+        {"title": "Build the game", "agent": "claude"},
+        {"title": "Make the sprites", "agent": "codex", "kind": "asset"},
+        {"title": "Play it", "agent": "codex", "kind": "qa", "browser": "clean", "depends_on": [1, 2]},
+    ])
+    brain = Brain.open(repo)
+    t = {i: {**brain.task(i), "branch": f"thoth/T{i}", "base_ref": "main", "base_commit": "abc1234"} for i in (1, 2, 3)}
+    claude = build_brief(brain, t[1], agent="claude")
+    assert "## How to work here" in claude and ".thoth/scratch/" in claude and "$TMPDIR included" in claude
+    assert "T3 tests the whole product after you" in claude
+    assert "no network" in claude and "don't launch Chrome" in claude
+    assert "`sed -i`" in claude and "with Write and Edit" in claude
+    codex = build_brief(brain, t[2], agent="codex")
+    assert ".thoth/scratch/" in codex and "T3 tests the whole product" in codex
+    assert "`sed -i`" not in codex and "$TMPDIR included" not in codex  # Codex's sandbox refuses neither
+    qa = build_brief(brain, t[3], agent="codex", browser="clean")
+    assert "a few screenshots" in qa and "no touch input" in qa
+    assert "don't launch Chrome" not in qa and "tests the whole product" not in qa
+    assert "## How to work here" not in build_brief(brain, t[1], agent="hermes", self_run=True)
+
+
+def test_scratch_files_stay_out_of_the_commit_and_the_run_files(repo):
+    from thoth_core import gitops
+    from thoth_core.agents import RunState
+    svc = Thoth(mcp_launcher=None)
+    svc.init(str(repo))
+    svc.plan(str(repo), [{"title": "Build", "agent": "claude"}])
+    brain = Brain.open(repo)
+    wt = Path(svc._prepare_worktree(brain, brain.task(1))["worktree"])
+    (wt / ".thoth" / "scratch").mkdir(parents=True)
+    (wt / ".thoth" / "scratch" / "check.py").write_text("print(1)\n")
+    (wt / "game.js").write_text("// game\n")
+    gitops.commit_all(wt, "thoth(claude): Build")
+    assert gitops.git(wt, "show", "--name-only", "--format=", "HEAD").split() == ["game.js"]
+    st = RunState(cwd=str(wt))
+    st.saw_write(str(wt / ".thoth" / "scratch" / "check.py"))
+    st.saw_write(".thoth/scratch/run.js")
+    st.saw_write(str(wt / "game.js"))
+    assert st.files()["written"] == ["game.js"]
+
+
+def test_plan_view_counts_resets_and_pace():
+    from thoth_core import plans
+    now = 1_800_000_000
+    snap = plans.from_codex({"rateLimits": {"planType": "plus",
+                                            "primary": {"usedPercent": 40, "windowDurationMins": 300, "resetsAt": now + 3600},
+                                            "secondary": {"usedPercent": 100, "windowDurationMins": 10080, "resetsAt": now + 86400}}}, now=now)
+    assert snap["plan"] == "plus" and snap["limited_until"] == now + 86400
+    v = plans.view({"codex": snap}, now=now)["codex"]
+    assert v["level"] == "limited" and [w["label"] for w in v["windows"]] == ["5-hour", "Weekly"]
+    assert v["windows"][0]["used"] == 0.4 and v["windows"][0]["elapsed"] == 0.8  # 4 of its 5 hours have passed
+    later = plans.view({"codex": snap}, now=now + 2 * 86400)["codex"]  # both windows have reset since
+    assert later["level"] == "ok" and all(w["used"] == 0 and w["rolled"] and w["resets_at"] is None for w in later["windows"])
+    claude = plans.from_claude({"status": "allowed", "rateLimitType": "seven_day", "isUsingOverage": False,
+                                "unifiedWindows": {"seven_day": {"utilization": 0.9, "resetsAt": now + 86400, "status": "allowed"}}}, now=now)
+    cv = plans.view({"claude": claude}, now=now)["claude"]
+    assert cv["level"] == "low" and cv["windows"][0]["label"] == "Weekly" and cv["limited_until"] is None
+    line = plans.hint(plans.view({"claude": claude, "codex": snap}, now=now))
+    assert "Claude Code has used 90% of its weekly limit" in line and "Codex has hit its plan limit" in line
+    assert "give Codex's tasks and reviews to Claude Code" in line
+    assert "big new tasks to Codex" not in line  # never steer work to an agent whose plan is out
+    fresh = plans.from_codex({"rateLimits": {"primary": {"usedPercent": 20, "windowDurationMins": 10080, "resetsAt": now + 86400}}}, now=now)
+    assert "give big new tasks to Codex rather than Claude Code" in plans.hint(plans.view({"claude": claude, "codex": fresh}, now=now))
+
+
+def test_agents_report_when_their_plan_runs_out():
+    from thoth_core.agents import ClaudeDriver, CodexDriver, RunState
+    st = RunState()
+    CodexDriver().parse(json.dumps({"type": "turn.failed", "error": {"message": "You've hit your usage limit. Upgrade to Pro or try again in 2 days 4 hours."}}), st)
+    assert st.plan_limit and st.is_error
+    other = RunState()
+    CodexDriver().parse(json.dumps({"type": "turn.failed", "error": {"message": "stream disconnected before completion"}}), other)
+    assert other.is_error and not other.plan_limit
+    st = RunState()
+    ClaudeDriver().parse(json.dumps({"type": "result", "is_error": True, "result": "Claude AI usage limit reached|1800003600"}), st)
+    assert st.plan_limit and st.plan_reset == 1800003600
+
+
+def test_an_agent_that_runs_out_of_plan_hands_its_task_to_the_other(repo):
+    import time
+    from thoth_core import plans
+    from thoth_core.agents import ClaudeDriver, RunState
+    svc = Thoth(mcp_launcher=None)
+    svc.init(str(repo))
+    svc.plan(str(repo), [{"title": "Build the page", "agent": "claude"}])
+    brain = Brain.open(repo)
+    svc._prepare_worktree(brain, brain.task(1))
+    brain.update_task(1, status="running")
+    run = brain.add_run(task_id=1, agent="claude", kind="build", prompt="", actor="t")
+    back = int(time.time()) + 3 * 3600
+    st, drv = RunState(), ClaudeDriver()
+    drv.parse(json.dumps({"type": "rate_limit_event", "rate_limit_info": {"status": "allowed", "resetsAt": back, "rateLimitType": "five_hour",
+                                                                          "unifiedWindows": {"five_hour": {"utilization": 0.97, "resetsAt": back, "status": "allowed"}}}}), st)
+    drv.parse(json.dumps({"type": "result", "is_error": True, "result": f"Claude AI usage limit reached|{back}"}), st)
+    assert st.plan_limit and st.plan_reset == back and st.plan["windows"][0]["label"] == "5-hour"
+    svc._finalize(brain, run["id"], st, 1, "")
+    assert brain.run(run["id"])["error"].startswith("plan limit") and brain.task(1)["status"] == "failed"
+    assert any("Codex can carry on" in n["body"] for n in brain.notes(task_id=1, kinds=("handoff",)))
+    need = next(n for n in svc.needs(str(repo)) if n["task"] == "T1")
+    assert need["kind"] == "relay" and need["agent"] == "codex" and need["title"] == "Claude Code ran out of plan on T1"
+    assert "carry on from Claude Code's work" in need["detail"]
+    svc.workers = lambda fresh=False: {"claude": {"ready": True}, "codex": {"ready": True}}
+    assert svc.default_reviewer("codex") == "codex"  # Claude's plan is out: Codex reviews in a fresh session
+    with pytest.raises(BrainError, match="Codex can take T1 instead"):
+        svc.assign(str(repo), "T1", agent="claude")
+    assert "agent=codex" in svc._run_brief(brain.run(run["id"]), brain.task(1))["next"]
+    view = svc.plan_usage(refresh=False)["claude"]
+    assert view["level"] == "limited" and view["limited_until"] == back and view["windows"][0]["used"] == 0.97
+    assert svc.snapshot(str(repo))["plans"]["claude"]["limited_until"] == back
+    assert "Claude Code has hit its plan limit" in svc.status(str(repo))["plans"]
+    off = Thoth(mcp_launcher=None, settings={"plan_usage": False})  # turned off: no numbers, no guard
+    assert "plans" not in off.snapshot(str(repo)) and off.plan_usage() == {}
+    off._check_plan("claude", "T1")
+    assert plans.limited_until(plans.load(svc.data_dir), "claude") == back
+
+
+def test_codex_limits_come_from_its_app_server(tmp_path):
+    import textwrap
+    reset = 1_900_000_000
+    fake = tmp_path / "codex"
+    fake.write_text(f"#!{sys.executable}\n" + textwrap.dedent(f"""
+        import json, sys
+        if sys.argv[1:] != ["app-server"]:
+            sys.exit(2)
+        for line in sys.stdin:
+            m = json.loads(line)
+            if m.get("method") == "initialize":
+                print(json.dumps({{"id": m["id"], "result": {{"userAgent": "fake"}}}}), flush=True)
+                print(json.dumps({{"method": "account/updated", "params": {{}}}}), flush=True)
+            elif m.get("method") == "account/rateLimits/read":
+                print(json.dumps({{"id": m["id"], "result": {{"ordinaryUsageAllowed": True, "rateLimits": {{"planType": "pro",
+                    "primary": {{"usedPercent": 92, "windowDurationMins": 300, "resetsAt": {reset}}},
+                    "secondary": {{"usedPercent": 61, "windowDurationMins": 10080, "resetsAt": {reset + 86400}}}}}}}}}), flush=True)
+    """))
+    fake.chmod(0o755)
+    svc = Thoth(mcp_launcher=None, settings={"codex_path": str(fake)})
+    snap = svc.refresh_codex_plan()
+    assert snap["plan"] == "pro" and [(w["label"], w["used"]) for w in snap["windows"]] == [("5-hour", 0.92), ("Weekly", 0.61)]
+    from thoth_core import plans
+    assert plans.load(svc.data_dir)["codex"]["source"] == "codex"
+    assert plans.read_codex(str(tmp_path / "missing")) is None

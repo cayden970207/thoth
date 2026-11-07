@@ -161,7 +161,9 @@ def with_node(env: dict[str, str]) -> dict[str, str]:
     return env
 
 
-_SHOTS = ("- Screenshots: capture what is on screen, not the full page, unless the task needs the whole page. Save the ones that "
+_SHOTS = ("- These tools click, type, drag with the mouse and press keys one press at a time. They have no touch input and can't "
+          "hold a key down: test those paths as far as that allows and list the rest under `limits`.\n"
+          "- Screenshots: capture what is on screen, not the full page, unless the task needs the whole page. Save the ones that "
           "belong in your result as .jpg (format jpeg) inside your worktree and list them under outputs.\n"
           f"- Use only these `{BROWSER_SERVER}` tools for the web, not a browser skill or command you may know of.\n")
 

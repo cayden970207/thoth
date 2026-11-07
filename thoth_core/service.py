@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from . import browser as web
-from . import gitops, preview
+from . import gitops, plans, preview
 from .agents import McpSpec, RunState, clean_env, driver_for
 from .brain import NOTE_KINDS, TASK_KINDS, OPEN_RUN_STATUSES, Brain, BrainError, find_brain_root, parse_id, rid, tid
 from .briefing import ago, board_lines, build_brief, parse_report, review_brief, strip_report
@@ -56,6 +56,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "link_dependencies": True,
     "dependency_dirs": list(gitops.DEFAULT_DEPENDENCY_DIRS),
     "setup_timeout_seconds": 600,
+    "plan_usage": True,
 }
 
 Notifier = Callable[[str, dict[str, Any]], None]
@@ -93,12 +94,14 @@ class Thoth:
         notifier: Notifier | None = None,
         mcp_launcher: McpLauncher | None = default_mcp_launcher,
         manager: RunManager | None = None,
+        data_dir: str | os.PathLike | None = None,
     ):
         self.settings = {**DEFAULT_SETTINGS, **(settings or {})}
         self.actor = actor
         self.notifier = notifier
         self.mcp_launcher = mcp_launcher
         self.manager = manager or _MANAGER
+        self.data_dir = Path(data_dir) if data_dir else plans.default_data_dir()  # plans.json lives here
 
     # -- project -----------------------------------------------------------------
 
@@ -267,6 +270,7 @@ class Thoth:
             current = brain.update_task(task_id, browser=web.normalize(browser))  # kept for later runs and revisions
         if agent == "hermes":
             return self._assign_to_coordinator(brain, current, instructions)
+        self._check_plan(agent, current["ref"])
         driver = self._driver(agent)
         browse = current.get("browser") or ""
         ok, why = web.ready(browse)
@@ -334,6 +338,7 @@ class Thoth:
         reviewer = (reviewer or self.default_reviewer(current["agent"])).strip().lower()
         if reviewer not in CLI_WORKERS:
             raise BrainError(f"reviewer must be one of {', '.join(CLI_WORKERS)}")
+        self._check_plan(reviewer, current["ref"], review=True)
         driver = self._driver(reviewer)
         self._check_capacity(brain)
         worktree = Path(current["worktree"])
@@ -398,14 +403,95 @@ class Thoth:
             Thoth._workers_refreshing.discard(key)
 
     def default_reviewer(self, author: str) -> str:
-        """The other agent reviews; when it can't run here, the same kind of agent reviews in a fresh session."""
+        """The other agent reviews; when it can't run here or its plan is out, the same kind of agent reviews
+        in a fresh session."""
         ready = self.workers()
         other = _other(author or "claude")
-        if ready.get(other, {}).get("ready"):
+        out = self._plans_out()
+        if ready.get(other, {}).get("ready") and other not in out:
             return other
-        if author in CLI_WORKERS and ready.get(author, {}).get("ready"):
+        if author in CLI_WORKERS and ready.get(author, {}).get("ready") and author not in out:
             return author
         return other
+
+    # -- plans: how much of each agent's plan is used -----------------------------------------------------
+
+    _plan_tries: dict[str, float] = {}
+
+    def plan_usage(self, refresh: bool = True) -> dict[str, dict]:
+        """Each agent's plan as of now (see plans.py). With refresh, Codex's numbers are re-read in the
+        background when they are over ten minutes old; Claude's come from its runs."""
+        if not self.settings.get("plan_usage", True):
+            return {}
+        data = plans.load(self.data_dir)
+        if refresh and time.time() - float((data.get("codex") or {}).get("seen_at") or 0) > 600:
+            if time.time() - Thoth._plan_tries.get("codex", 0) > 120 and self.workers().get("codex", {}).get("ready"):
+                Thoth._plan_tries["codex"] = time.time()
+                threading.Thread(target=self.refresh_codex_plan, name="thoth-plan", daemon=True).start()
+        return plans.view(data)
+
+    def refresh_codex_plan(self) -> dict | None:
+        """Ask Codex's app server for this login's limits (no tokens used) and keep the answer."""
+        exe = driver_for("codex", self.settings).resolve()
+        if not exe or not self.settings.get("plan_usage", True):
+            return None
+        from . import __version__
+
+        result = plans.read_codex(exe, clean_env(self.settings.get("env_passthrough") or ()), version=__version__)
+        if result is None:
+            return None
+        snap = plans.from_codex(result)
+        plans.save(self.data_dir, "codex", snap)
+        return snap
+
+    def _plans_out(self) -> set[str]:
+        if not self.settings.get("plan_usage", True):
+            return set()
+        views = plans.view(plans.load(self.data_dir))
+        return {a for a, v in views.items() if v.get("limited_until")}
+
+    def _check_plan(self, agent: str, ref: str, review: bool = False) -> None:
+        """Don't start an agent whose plan has run out: say who can take the work instead."""
+        if not self.settings.get("plan_usage", True):
+            return
+        until = plans.limited_until(plans.load(self.data_dir), agent)
+        if until and agent == "codex" and self.refresh_codex_plan() is not None:
+            until = plans.limited_until(plans.load(self.data_dir), agent)  # Codex can say at once whether it is back
+        if not until:
+            return
+        other = _other(agent)
+        job = "review" if review else "take"
+        raise BrainError(f"{_name(agent)} has hit its plan limit until {plans.when(until)}. {_name(other)} can {job} {ref} instead "
+                         f"({'thoth_review with reviewer' if review else 'thoth_assign with agent'}={other}); "
+                         f"{'' if review else 'the work so far stays on its branch. '}Or wait until then.")
+
+    def _plan_after_run(self, brain: Brain, run: dict, task: dict, state: RunState, status: str, fields: dict) -> None:
+        """Keep what the run said about its agent's plan; when the run stopped because the plan ran out,
+        say so plainly and leave a handoff so the other agent can carry on."""
+        if not self.settings.get("plan_usage", True):
+            return
+        agent = run["agent"]
+        try:
+            if state.plan:
+                plans.save(self.data_dir, agent, state.plan)
+            out = status != "done" and (state.plan_limit or bool(state.plan.get("limited_until")))
+            if out:
+                until = state.plan_reset or state.plan.get("limited_until")
+                if agent == "codex":
+                    snap = self.refresh_codex_plan()  # Codex knows its own reset time
+                    until = until or (snap or {}).get("limited_until")
+                plans.mark_limited(self.data_dir, agent, until)
+                until = plans.limited_until(plans.load(self.data_dir), agent)
+                fields["error"] = f"plan limit: {_name(agent)} hit its plan limit; it resets {plans.when(until)}"
+                if run["kind"] == "build":
+                    other = _other(agent)
+                    brain.add_note(kind="handoff", author="thoth", task_id=task["id"], run_id=run["id"],
+                                   body=f"{_name(agent)} stopped at its plan limit (back {plans.when(until)}). Its work so far is "
+                                        f"committed on {task['branch']}: {_name(other)} can carry on from there.")
+            elif agent == "codex":
+                threading.Thread(target=self.refresh_codex_plan, name="thoth-plan", daemon=True).start()
+        except Exception:
+            logger.debug("thoth: could not record plan usage", exc_info=True)
 
     def _check_capacity(self, brain: Brain) -> None:
         limit = int(self.settings.get("max_concurrent_runs") or 3)
@@ -637,6 +723,7 @@ class Thoth:
                 brain.add_note(kind="review", author=author, body=body, task_id=task["id"], run_id=run_id)
             for decision in _as_list(report.get("decisions")):
                 brain.add_note(kind="decision", author=author, body=decision, task_id=task["id"], run_id=run_id)
+        self._plan_after_run(brain, run, task, state, status, fields)
         brain.update_run(run_id, **fields)
         final = brain.run(run_id)
         verb = "built" if run["kind"] == "build" else "reviewed"
@@ -943,6 +1030,7 @@ class Thoth:
             "decisions": [f"{n['author']}: {n['body']}" for n in brain.notes(kinds=("decision",), limit=10)],
             "recent": [f"{ago(e['ts'])} {e['actor']}: {e['message']}" for e in brain.events(limit=10)],
             "tokens": (lambda us: f"{us['total']['prompt']:,} prompt tokens across agents ({round(us['cache_rate'] * 100)}% cache hits); about {us['kept_out_tokens']:,} tokens of agent transcripts stayed out of the coordinator's context")(self.usage(brain)),
+            **({"plans": line} if (line := plans.hint(self.plan_usage(refresh=False))) else {}),
             "brain_file": str(brain.dir / "BRAIN.md"),
         }
 
@@ -990,6 +1078,14 @@ class Thoth:
                 else:
                     out.append({"id": f"fix-{t['ref']}", "kind": "fix", "task": t["ref"], "who": reviewer, "priority": 2,
                                 "title": f"{n or 'Some'} change{'s' if n != 1 else ''} asked on {t['ref']}", "detail": f"{_name(t['agent'])} can pick them up in its last session", "tool": "thoth_assign"})
+            elif t["status"] == "failed" and str((last_build or {}).get("error") or "").startswith("plan limit"):
+                # The agent's plan ran out mid-task: the other agent can carry on from the committed work.
+                gone, other = t["agent"] or "claude", _other(t["agent"] or "claude")
+                until = plans.limited_until(plans.load(self.data_dir), gone) if self.settings.get("plan_usage", True) else None
+                out.append({"id": f"relay-{t['ref']}", "kind": "relay", "task": t["ref"], "who": other, "agent": other, "priority": 1,
+                            "title": f"{_name(gone)} ran out of plan on {t['ref']}",
+                            "detail": f"{_name(other)} can carry on from {_name(gone)}'s work now" + (f", or wait until {plans.when(until)}" if until else ""),
+                            "tool": "thoth_assign"})
             elif t["status"] == "failed":
                 # An agent that finished and said it was blocked is not a crash: say so, with its reason.
                 said_blocked = bool(last_build) and last_build["status"] == "done" and outcome == "blocked"
@@ -998,7 +1094,8 @@ class Thoth:
                             "title": f"{t['ref']} is blocked" if said_blocked else f"{t['ref']} needs another try",
                             "detail": err[:160] or "The last run did not finish", "tool": "thoth_assign"})
             elif t["status"] == "built":
-                detail = f"Ask {_name(_other(t['agent'] or 'claude'))} to review it"
+                # The reviewer a click would get: the other agent, unless its plan is out or it can't run here.
+                detail = f"Ask {_name(self.default_reviewer(t['agent'] or 'claude'))} to review it"
                 if limits:
                     detail += f" · {_name(t['agent'] or 'claude')} couldn't check {len(limits)} thing{'s' if len(limits) != 1 else ''}"
                 out.append({"id": f"review-{t['ref']}", "kind": "review", "task": t["ref"], "who": t["agent"], "priority": 3,
@@ -1133,6 +1230,7 @@ class Thoth:
             "agents": self.presence(brain),
             "workers": self.workers(),
             "usage": self.usage(brain),
+            **({"plans": self.plan_usage()} if self.settings.get("plan_usage", True) else {}),
             "now": time.time(),
         }
 
@@ -1175,6 +1273,11 @@ class Thoth:
             out["summary"] = run["summary"]
             if run["error"]:
                 out["error"] = run["error"]
+            if str(run["error"] or "").startswith("plan limit"):
+                other = _other(run["agent"])
+                out["next"] = (f"{_name(run['agent'])}'s plan ran out. Give {task['ref']} to {_name(other)}: "
+                               f"thoth_{'assign' if run['kind'] == 'build' else 'review'} with "
+                               f"{'agent' if run['kind'] == 'build' else 'reviewer'}={other}.")
             if run["diffstat"]:
                 out["diffstat"] = run["diffstat"].splitlines()[-1].strip()
             if run["commit_after"]:

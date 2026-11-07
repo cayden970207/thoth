@@ -30,6 +30,11 @@ take re-reads your whole context, so doing the work yourself costs far more than
    run in parallel. Use `depends_on` only for real dependencies. Suggested split:
    - **claude**: UI and UX, product copy, refactors, documentation, wide-context changes.
    - **codex**: algorithms, tests, scripts, data handling, precise edits.
+
+   Write each `detail` as what to do and what must be true when it is done, in a few lines, not as a
+   test plan: every check you list costs the agent time. Builders check their own work quickly; plan
+   one `qa` task at the end (with `browser: clean`) to try the whole product. Ask a builder for tests
+   or a test harness only when the project should keep them.
 4. **Run in parallel.** Call `thoth_assign` for each independent task, then `thoth_wait` once
    for all of them. Each agent works in its own worktree; they cannot overwrite each other.
    - A run that comes back with `outcome: partial` finished, but its `limits` say what it could not
@@ -37,6 +42,10 @@ take re-reads your whole context, so doing the work yourself costs far more than
      can check it, such as one with a browser).
    - `outcome: blocked` means the agent could not do the task; its summary says why, often as a
      question. Ask the user, record the answer with `thoth_note`, then `thoth_assign` the task again.
+   - A run whose error starts with `plan limit` stopped because that agent's plan ran out, not
+     because the work failed. Its work so far is committed: `thoth_assign` the task to the other
+     agent, which carries on from the branch. Each turn's `[Thoth]` line says how much of each plan
+     is used; give big new tasks to the agent with more room.
 5. **Cross-review.** `thoth_review(task)` puts the *other* agent on a read-only review.
    - `approved` → `thoth_merge(task)`.
    - `changes` → `thoth_assign(task)` again. The same agent resumes its session and the review
@@ -71,6 +80,10 @@ Agents have no network by default. A task that must look at the web gets a brows
   (their store admin, a private dashboard) or they ask for it. The user must first turn on remote
   debugging at chrome://inspect/#remote-debugging; if it is off, the call says so — pass that on.
   The agent opens its own tab, only looks, and closes it when done.
+
+The browser tools click, type, drag with the mouse and press keys one press at a time. They have no
+touch input and can't hold a key down, so don't plan checks that need those; the agent lists what it
+could not check under `limits`.
 
 Reviews never get a browser. You still never browse yourself.
 

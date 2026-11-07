@@ -26,6 +26,7 @@ from typing import Any
 from .thoth_core import __version__
 from .thoth_core import browser as web
 from .thoth_core import chats
+from .thoth_core import plans
 from .thoth_core import projects as registry
 from .thoth_core.agents import driver_for
 from .thoth_core.brain import Brain, BrainError, find_brain_root, parse_id
@@ -506,6 +507,12 @@ class ThothPlugin:
         if missing:
             lines.append("On this machine " + "; ".join(missing) + ". Plan and review only with the agents that can run here "
                          "(an agent can review its own kind's work in a fresh session), and tell the user how to add the other if they ask.")
+        try:
+            plan_line = plans.hint(Thoth(settings=self.settings()).plan_usage(refresh=False))
+        except Exception:
+            plan_line = ""
+        if plan_line:
+            lines.append(plan_line)
         if running:
             lines.append("Running: " + "; ".join(f"{r['ref']} {r['agent']} {r['kind']} {r['task_ref']}: {r['progress'][:80]}" for r in running))
         try:

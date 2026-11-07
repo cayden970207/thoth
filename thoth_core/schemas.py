@@ -45,7 +45,7 @@ TOOLS: dict[str, tuple[str, dict]] = {
             "goal": {"type": "string", "description": "Set or update the project goal"},
             "tasks": {"type": "array", "items": {"type": "object", "properties": {
                 "title": {"type": "string", "description": "Short imperative"},
-                "detail": {"type": "string", "description": "Instructions and acceptance criteria"},
+                "detail": {"type": "string", "description": "What to do and what must be true when done, in a few lines (not a test plan)"},
                 "agent": _WORKER, "kind": _KIND, "role": _ROLE, "model": _MODEL, "effort": _EFFORT, "browser": _BROWSER,
                 "depends_on": {"type": "array", "items": {"type": ["string", "integer"]}, "description": "Task ids (\"T2\") or 1-based positions in this list"},
             }, "required": ["title"]}},
