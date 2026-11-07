@@ -194,6 +194,8 @@ terminal never hides it. Click a task and a small card rises from the bottom wit
 and action, while the canvas stays in view; **All details** grows it in place, and Esc or a click on the
 canvas puts it away. Once the window is wide enough, the details open in a column beside the canvas instead.
 
+![Thoth's side window beside a project's chat in Hermes Desktop: Hermes's answer on the left, the tiny-crm canvas on the right](docs/screenshots/side-window.png)
+
 **One project, one place in Hermes.** Every Thoth project is also a Hermes project on the same folder. The
 first time Thoth shows a project it creates that Hermes project (named after the folder, in the project's
 colour, or reuses the one you already have there) and moves the project's chat into the folder, the same as
