@@ -312,7 +312,7 @@ function Logo ({ agent, size }) {
 // The builder's icon with the reviewer's on its corner ("Codex builds, Claude Code reviews").
 function Pair ({ agent, reviewer, live, size = 30 }) {
   const both = reviewer && reviewer !== agent
-  return h('span', { className: 'th-pair' + (live ? ' th-pair-live' : ''), style: { width: size, height: size, '--c': live ? AGENTS[live.agent].color : undefined }, title: AGENTS[agent].name + (both ? ' builds · ' + AGENTS[reviewer].name + ' reviews' : '') },
+  return h('span', { className: 'th-pair' + (live ? ' th-pair-live' : '') + (agent === 'hermes' ? ' th-pair-round' : ''), style: { width: size, height: size, '--c': live ? AGENTS[live.agent].color : undefined }, title: AGENTS[agent].name + (both ? ' builds · ' + AGENTS[reviewer].name + ' reviews' : '') },
     h(Mini, { agent, size }), both ? h('span', { className: 'th-pair-sub' }, h(Mini, { agent: reviewer, size: 16 })) : null)
 }
 // What a task made, tucked behind its card: photos and videos show themselves, everything else is a document.
@@ -2555,7 +2555,17 @@ textarea.th-cmd-input{resize:none;line-height:1.45;padding:4px 0;max-height:120p
 .th-pair .th-mini{margin:0!important}
 .th-pair-sub{position:absolute;right:-5px;bottom:-5px;display:inline-flex;border-radius:6px;box-shadow:0 0 0 2px var(--th-panel)}
 .th-pair-sub .th-mini-hermes{border-radius:50%}
-.th-pair.th-pair-live::after{content:"";position:absolute;inset:-4px;border-radius:12px;border:2px solid transparent;border-top-color:var(--c);border-right-color:var(--c);animation:th-spin 1.2s linear infinite}
+/* While an agent works: a still ring around the avatar (same shape, 4.5px out), a comet of the agent's colour
+   running round it over a faint track, and a soft glow behind the avatar that follows the comet. */
+@property --th-sweep{syntax:"<angle>";inherits:false;initial-value:0deg}
+@keyframes th-sweep{to{--th-sweep:360deg}}
+.th-pair.th-pair-live{isolation:isolate}
+.th-pair.th-pair-live .th-pair-sub{z-index:2}
+.th-pair.th-pair-live::before,.th-pair.th-pair-live::after{content:"";position:absolute;pointer-events:none;animation:th-sweep 1.6s linear infinite}
+.th-pair.th-pair-live::before{inset:-6px;border-radius:15px;z-index:-1;background:conic-gradient(from var(--th-sweep),transparent 0% 55%,color-mix(in srgb,var(--c) 75%,transparent) 100%);filter:blur(5px);opacity:.55}
+.th-pair.th-pair-live::after{inset:-4.5px;border-radius:13.5px;padding:2.5px;background:conic-gradient(from var(--th-sweep),transparent 0% 50%,color-mix(in srgb,var(--c) 40%,transparent) 80%,var(--c) 100%),color-mix(in srgb,var(--c) 16%,transparent);-webkit-mask:linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0);-webkit-mask-composite:xor;mask:linear-gradient(#000 0 0) content-box exclude,linear-gradient(#000 0 0)}
+.th-pair.th-pair-round::before,.th-pair.th-pair-round::after{border-radius:50%}
+@media (prefers-reduced-motion:reduce){.th-pair.th-pair-live::before{display:none}.th-pair.th-pair-live::after{animation:none;background:color-mix(in srgb,var(--c) 75%,transparent)}}
 
 /* canvas */
 .th-root .th-surface{border:0;border-radius:28px;background:var(--th-sunken);box-shadow:inset 0 0 0 1px var(--th-line)}
