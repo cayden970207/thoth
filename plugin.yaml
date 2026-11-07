@@ -1,5 +1,5 @@
 name: thoth
-version: 0.8.0
+version: 0.9.0
 manifest_version: 2
 api_version: 1
 description: >-
@@ -50,6 +50,11 @@ config_schema:
     choices: [claude, codex]
     label: Default worker
     description: Agent used when a task has none.
+  projects_dir:
+    type: str
+    default: "~/Thoth"
+    label: Folder for new projects
+    description: A new project that Hermes names with a short name gets a folder here. Name a full path in the chat to put one elsewhere.
   claude_permission_mode:
     type: str
     default: acceptEdits
@@ -118,6 +123,11 @@ config_schema:
     default: 600000
     label: Start fresh instead of resuming above this many tokens
     description: Resuming re-sends the agent's whole earlier session on every call. When that session already used more prompt tokens than this, Thoth starts a fresh session with the brief instead.
+  copy_kept_out_files:
+    type: bool
+    default: true
+    label: Copy files the project keeps out of git into each task folder
+    description: Test builds, game images, big videos and other files your project keeps out of git reach every agent as copy-on-write copies (never secrets or caches), so changing one never touches your original. When a task is merged, the new files it made outside git move into your project folder, never over an existing file.
   link_dependencies:
     type: bool
     default: true

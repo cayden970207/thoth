@@ -26,7 +26,9 @@ from typing import Any
 from .thoth_core import __version__
 from .thoth_core import autopilot
 from .thoth_core import browser as web
+from .thoth_core import changelog
 from .thoth_core import chats
+from .thoth_core import folders
 from .thoth_core import plans
 from .thoth_core import projects as registry
 from .thoth_core.agents import driver_for
@@ -112,13 +114,43 @@ class ThothPlugin:
     def project_for(self, args: dict, scope: str = "") -> str:
         """The project a call is about: the one it names, else the one this chat is bound to, else the default."""
         named = str(args.get("project") or "").strip()
-        if named:
-            return named
+        if named and named not in (".", "./"):
+            return self.place(named, new=bool(args.get("create")))
         with self._lock:
             bound = self._session_projects.get(scope, "") if scope else ""
         if not bound and scope:
             bound = chats.project_of(self._data_dir(), scope)  # bound before Hermes last restarted
         return bound or self.default_project()
+
+    def place(self, named: str, new: bool = False) -> str:
+        """The folder a call names. A full path is that folder. A short name is a project Thoth knows by that folder
+        name, else (and always for a new project) a folder in the projects folder: never next to Hermes's own files,
+        where its gateway runs."""
+        path = Path(named).expanduser()
+        if path.is_absolute():
+            return str(path)
+        if not new and len(path.parts) == 1:
+            for known in self._known_projects():
+                if Path(known).name.casefold() == named.casefold():
+                    return known
+        return str(folders.projects_home(self.settings().get("projects_dir")) / path)
+
+    def _init_folder(self, args: dict, project: str) -> str:
+        """Where thoth_init works. A new project (create=true) without a name means this chat's own folder, never the
+        project this chat last talked about; Thoth itself refuses a folder that holds far more than one project."""
+        if not args.get("create") or str(args.get("project") or "").strip() not in ("", ".", "./"):
+            return project
+        home = folders.tilde(folders.projects_home(self.settings().get("projects_dir")))
+        name_it = (f"call thoth_init again with create=true and project set to a short folder name, e.g. bakery-site "
+                   f"(Thoth makes it in {home}/bakery-site)")
+        here = self.session_dir()
+        if not here:
+            raise BrainError(f"Name the new project: {name_it}.")
+        root = find_brain_root(here)
+        if root is not None:
+            raise BrainError(f"This chat's folder is already the Thoth project {root.name}. For a new project, {name_it}; "
+                             f"to keep working on {root.name}, call thoth_init without create.")
+        return here
 
     @staticmethod
     def _data_dir() -> Path:
@@ -205,7 +237,7 @@ class ThothPlugin:
         if name == "thoth_init":
             setup = " ".join(str(args.get("setup") or "").split())
             run = " ".join(str(args.get("run") or "").split())
-            where = str(Path(project).expanduser())
+            where = folders.tilde(Path(project).expanduser())
             lines = []
             if setup:
                 lines.append(f"Before an agent starts on a task, Thoth will run `{setup}` in that task's folder.")
@@ -222,11 +254,13 @@ class ThothPlugin:
         if name == "thoth_merge":
             base = brain.meta().get("base_branch", "") or "main"
             builder = _AGENT_LABEL.get(task["agent"], task["agent"].capitalize())
-            if args.get("override"):
+            if args.get("override") and task["status"] == "changes":
                 head = f"Merge {what} into {base}, although its review comments are still open."
             else:
                 head = f"Merge {what} into {base}."
-            body = f"{builder} built it" + (", and the review passed." if task["status"] == "approved" else ".") + " If anything conflicts, nothing changes."
+            # Say what is true of this task: reviewed and passed, never reviewed, or neither.
+            reviewed = {"approved": ", and the review passed.", "built": ". Nobody has reviewed it."}.get(task["status"], ".")
+            body = f"{builder} built it{reviewed} If anything conflicts, nothing changes."
             text = f"{head}\n{body}\nDetails: git merge --no-ff {task['branch']} in {brain.root}."
             key = f"thoth:merge{':override' if args.get('override') else ''}:{_short_hash(str(brain.root))}"
             return text, key
@@ -328,6 +362,8 @@ class ThothPlugin:
         if self._self_assign(tool_name, args, svc, project):
             return None
         try:
+            if tool_name == "thoth_init":
+                project = self._init_folder(args, project)
             text, key = self._approval_text(tool_name, args, svc, project)
         except BrainError as exc:
             return {"action": "block", "message": f"Thoth: {exc}"}
@@ -408,6 +444,8 @@ class ThothPlugin:
             scope = str(kwargs.get("session_id") or kwargs.get("task_id") or "")
             project = self.project_for(args, scope)
             try:
+                if name == "thoth_init":
+                    project = self._init_folder(args, project)
                 if self._gated(name, args) and not self._self_assign(name, args, svc, project):
                     ticket = self._take_ticket(name, args, scope)
                     if ticket is None:
@@ -424,11 +462,11 @@ class ThothPlugin:
                 elif name == "thoth_autopilot":
                     if str(args.get("action") or "").lower() == "start":
                         args["session"] = _session_key()  # where autopilot writes when it needs the user
-                    result = call(svc, name, args, lambda: project)
+                    result = call(svc, name, {**args, "project": project}, lambda: project)
                     if result.get("autopilot") == "running":
                         self._ensure_conductor()
                 else:
-                    result = call(svc, name, args, lambda: project)
+                    result = call(svc, name, {**args, "project": project}, lambda: project)
                 self.remember(project)
                 root = find_brain_root(project) if project else None
                 if root is not None and scope:
@@ -822,6 +860,12 @@ def register(ctx: Any) -> None:
     global _plugin
     plugin = ThothPlugin(ctx)
     _plugin = plugin
+    # What's new starts here: a new install starts at this version, so its first project never opens with a
+    # list of changes, while someone updating sees what this version brings (thoth_core/changelog.py).
+    try:
+        changelog.start(plugin._data_dir(), __version__)
+    except Exception as exc:
+        logger.debug("thoth: what's new not set up: %s", exc)
     for name, (description, parameters) in TOOLS.items():
         ctx.register_tool(
             name=name,

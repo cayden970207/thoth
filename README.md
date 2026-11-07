@@ -153,13 +153,26 @@ hermes thoth doctor                          # checks claude, codex, git and the
 
 Then open the **Thoth** page in Hermes Desktop's sidebar.
 
+### Updates
+
+Hermes checks your plugins for updates once a day. When a new Thoth is ready, Settings → Plugins shows
+**Update** (or run `hermes plugins update thoth`). Once it is installed, the Thoth page shows what's new, once.
+Click the version beside **Thoth** at the top to read every version's notes; they are also in
+[CHANGELOG.md](CHANGELOG.md).
+
 ## Use it
 
-Open Hermes in a git project and talk to it:
+Tell Hermes what to build, or click **New project** in the project menu on the Thoth page:
 
-> Start a Thoth brain for this project: a tip calculator web page. Plan it so
+> Start a new Thoth project: a tip calculator web page. Plan it so
 > Claude builds the UI and Codex writes the calculation logic with tests, run
 > them in parallel, then have each review the other's work and merge what passes.
+
+Thoth gives a new project its own folder in `~/Thoth` (the `projects_dir` setting) that keeps every version.
+To work in a folder you already have, open the chat there or give Hermes its path. If it isn't in git yet,
+Thoth makes the repository and saves what is there as the first version; secrets such as `.env`, system
+files, dependency folders and files over 50 MB stay in the folder but out of git. Thoth never turns your home
+folder, Desktop, Documents, Downloads, a settings folder or a folder of projects into one project.
 
 Hermes will call the Thoth tools; you approve each agent launch and each merge. An approval covers the plan as
 the card showed it: if the task, who does it, what it builds on or the work to merge changes before you answer,
@@ -180,9 +193,7 @@ nothing starts and Hermes asks again.
 | `thoth_cancel`, `thoth_update_task`, `thoth_coordinator` | Stop a run, edit a task, hand over coordination |
 | `thoth_autopilot` | Run the whole plan after you approve it once on a plan card (**needs your approval**); pause, stop or check it |
 
-For a brand-new project, ask for one: Hermes calls `thoth_init(create=true)` and Thoth makes the folder
-and its git repository. A task that depends on several unfinished tasks starts with all of their work
-merged into its branch.
+A task that depends on several unfinished tasks starts with all of their work merged into its branch.
 
 **Talk on the left, watch on the right.** Each project has one chat with Hermes, pinned in the sidebar in
 the project's colour. Beside it, Thoth docks a side window with the whole canvas (drag the divider to
@@ -226,6 +237,17 @@ For an app with a backend (say a CRM whose server also serves its pages), give t
 `thoth_init(run="python3 backend/server.py --port {port}")`, approved by you. **Run & open** then starts the
 app for the version you are looking at, in a clean copy under `.thoth/previews/`, so the database or logs it
 writes never end up in an agent's work or your checkout.
+
+**Files kept out of git.** A task worktree is a clean checkout, so on its own it holds only what git tracks.
+Thoth gives each new worktree its own copies of what your project keeps out of git (test builds, game
+images, big videos, private inputs), so agents can use them as you do. The copies are copy-on-write clones
+(APFS on macOS, reflinks on btrfs or XFS): they appear at once, take no extra disk until something changes,
+and changing one never touches your original. Secrets (`.env` files, keys) and caches are never copied, and a
+folder with more than 200,000 files stays behind. On a disk that cannot make such copies, folders are linked
+read-only instead. A task that builds on another also gets what that one made outside git. When a task is
+merged, the new files it made outside git move into your project folder, never over a file already there.
+Copies of your files that it changed stay in its worktree, which is then kept. Turn this off with the
+`copy_kept_out_files` setting.
 
 **Dependencies.** A task worktree is a clean checkout, and the agents' sandboxes have no network, so they
 cannot reinstall packages. Thoth links ignored `node_modules`, `.venv` and `venv` folders from your main
@@ -289,9 +311,9 @@ change, so any tool can catch up by reading one file.
 ## Settings
 
 Hermes Desktop → Settings → Plugins → Thoth, or `plugins.entries.thoth.settings` in `config.yaml`:
-default worker, Claude Code permission mode and extra allowed tools, models, CLI
-paths, run timeout (default 30 min), max parallel runs (default 3), whether agents
-get the Thoth MCP tools, session resume, worktree cleanup, chat notifications,
+the folder for new projects (default `~/Thoth`), default worker, Claude Code permission mode and extra
+allowed tools, models, CLI paths, run timeout (default 30 min), max parallel runs (default 3), whether agents
+get the Thoth MCP tools, session resume, copies of files kept out of git, worktree cleanup, chat notifications,
 environment passthrough, plan usage, and autopilot's time limit (default 8 hours, up to 24) and the share of each
 plan it leaves you (default 20 %).
 
@@ -322,7 +344,15 @@ plan it leaves you (default 20 %).
 - **Writes into your project**: `.thoth/` (SQLite brain, `BRAIN.md`, run logs with the agents' full
   JSON output, worktrees), one line in `.git/info/exclude`, git branches `thoth/T<n>-…`, commits
   authored `Thoth <thoth@localhost>` on those branches, and merge commits on your base branch when
-  you approve a merge. In a repository with no commits it makes one empty initial commit.
+  you approve a merge. In a repository with no commits it makes one empty initial commit. In a folder that
+  isn't in git yet it makes the repository and commits the files there as the first version, keeping
+  secrets (`.env`, `.env.*`, `*.pem`, `.npmrc`, `.netrc`, SSH keys), `.DS_Store`, dependency folders and
+  files over 50 MB out of git with lines in `.git/info/exclude`. It refuses to do that in your home folder,
+  its Desktop, Documents, Downloads and similar folders, a settings folder or a folder of projects. A new
+  project named with a short name gets a folder in `projects_dir` (`~/Thoth`). Each worktree gets
+  copy-on-write copies of what the project keeps out of git (never secrets or caches; exact-path lines in
+  `.git/info/exclude` keep read-only links out of git where a disk can't copy), and a merge moves the new
+  files a task made outside git into the project folder without overwriting anything.
 - **Background processes**: runs continue after the tool call returns, up to the timeout; they are
   killed (whole process group) on cancel, timeout, plugin unload and Hermes exit.
 - **Run previews**: with a project run command (approved by you), Thoth exports the version you open to
@@ -372,6 +402,8 @@ plan it leaves you (default 20 %).
   tokens) after Codex runs and at most every ten minutes while the Thoth page is open. Both CLIs answer with
   their own logins. The latest numbers are kept in the plugin's data folder (`plans.json`). While a plan is
   out, Thoth won't start that agent and names the other one instead.
+- **What's new**: the notes come with the plugin (`CHANGELOG.md`), so showing them makes no network call. The
+  last version whose notes you've seen is kept in the plugin's data folder (`whatsnew.json`, one version number).
 - No network calls of its own (the browser package above is fetched by npx when a task first browses), no
   telemetry, no credential reads, no self-updating code.
 
@@ -384,7 +416,8 @@ hermes plugins doctor . --ci
 ```
 
 `thoth_core/` is plain Python with no third-party dependencies, shared by the Hermes plugin
-(`__init__.py`) and the MCP server (`mcp_server.py`).
+(`__init__.py`) and the MCP server (`mcp_server.py`). How a version is released, from `plugin.yaml` and
+`CHANGELOG.md` to the plugin catalog: [docs/releasing.md](docs/releasing.md).
 
 ## License
 

@@ -445,6 +445,93 @@ def test_init_can_create_a_new_project(tmp_path):
     result = svc.init(str(target), goal="A coffee site", create=True)
     assert (target / ".git").exists() and (target / ".thoth" / "brain.db").exists()
     assert "new git repository" in result["created"]
+    # A short name goes in the projects folder, never next to whatever process runs Thoth.
+    svc = Thoth(mcp_launcher=None, settings={"projects_dir": str(tmp_path / "Thoth")})
+    svc.init("cafe", goal="A cafe site", create=True)
+    assert (tmp_path / "Thoth" / "cafe" / ".thoth" / "brain.db").exists() and not Path("cafe").exists()
+
+
+def test_a_short_name_makes_the_project_in_the_projects_folder(tmp_path, monkeypatch):
+    home = tmp_path / "Thoth"
+    plugin = _load_plugin()
+    ctx = FakeCtx()
+    ctx.get_config = lambda key, default=None: str(home) if key == "projects_dir" else default
+    plugin.register(ctx)
+    monkeypatch.chdir(tmp_path)  # where Hermes's gateway runs: ~/.hermes
+    out = json.loads(ctx.tools["thoth_init"]({"project": "bakery-site", "goal": "A page for my bakery", "create": True}, session_id="s1"))
+    assert out["ok"], out
+    assert (home / "bakery-site" / ".thoth" / "brain.db").exists() and not (tmp_path / "bakery-site").exists()
+    assert str(home / "bakery-site") in out["created"]
+    # Later calls can name it the same way.
+    status = json.loads(ctx.tools["thoth_status"]({"project": "bakery-site"}, session_id="s2"))
+    assert status["ok"] and "A page for my bakery" in json.dumps(status, ensure_ascii=False)
+
+
+def test_a_plain_folder_becomes_a_project_with_its_files_as_the_first_version(tmp_path):
+    folder = tmp_path / "my-site"
+    (folder / "img").mkdir(parents=True)
+    (folder / "index.html").write_text("<h1>Hi</h1>")
+    (folder / "img" / "logo.svg").write_text("<svg/>")
+    (folder / ".env").write_text("SECRET=1")
+    (folder / ".DS_Store").write_bytes(b"\0")
+    (folder / "node_modules" / "x").mkdir(parents=True)
+    (folder / "node_modules" / "x" / "i.js").write_text("")
+    with open(folder / "clip [raw].mov", "wb") as fh:
+        fh.truncate(51 * 1024 * 1024)  # big on paper, sparse on disk
+    out = Thoth(mcp_launcher=None).init(str(folder), goal="Refresh my site")
+    tracked = subprocess.run(["git", "ls-files"], cwd=folder, capture_output=True, text=True, check=True).stdout.split()
+    assert sorted(tracked) == ["img/logo.svg", "index.html"]
+    assert "saved the 2 files" in out["created"]
+    assert ".env" in out["created"] and "clip [raw].mov" in out["created"] and "node_modules/" in out["created"]
+    assert (folder / ".env").read_text() == "SECRET=1" and (folder / "clip [raw].mov").exists()  # left where they were
+
+
+def test_thoth_never_makes_a_project_of_a_folder_that_holds_much_more(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    for sub in ("Documents", ".hermes", ".config/x", "code/a/.git", "code/b/.git"):
+        (home / sub).mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    svc = Thoth(mcp_launcher=None)
+    for folder, why in ((home, "home folder"), (home / "Documents", "Documents folder"), (home / ".hermes", "Hermes's own"),
+                        (home / ".config" / "x", "~/.config"), (home / "code", "holds 2 projects"), (home / "Thoth", "holds your Thoth")):
+        with pytest.raises(BrainError) as err:
+            svc.init(str(folder), create=True)
+        assert why in str(err.value) and "short folder name" in str(err.value), err.value
+    assert not any((home / sub / ".git").exists() for sub in ("", "Documents", ".hermes", ".config/x", "code", "Thoth"))
+    with pytest.raises(BrainError, match="does not exist"):
+        svc.init(str(home / "nope"))
+    # A folder of its own inside home is fine, also when home itself is kept in git (dotfiles).
+    _git(home, "init", "-q")
+    (home / "shop").mkdir()
+    (home / "shop" / "menu.md").write_text("coffee")
+    assert "first version" in svc.init(str(home / "shop"))["created"] and (home / "shop" / ".git").exists()
+
+
+def test_a_new_project_without_a_name_starts_in_the_chats_own_folder_or_asks_for_one(repo, tmp_path_factory, monkeypatch):
+    home = tmp_path_factory.mktemp("home")
+    monkeypatch.setenv("HOME", str(home))
+    plugin = _load_plugin()
+    ctx = FakeCtx()
+    plugin.register(ctx)
+    inst = ctx.hooks["pre_llm_call"].__self__
+    # A chat in the home folder: Thoth asks for a name instead of making the home folder a project.
+    monkeypatch.setattr(inst, "session_dir", lambda: str(home))
+    out = json.loads(ctx.tools["thoth_init"]({"goal": "A bakery page", "create": True}, session_id="s1"))
+    assert not out["ok"] and "short folder name" in out["error"] and not (home / ".git").exists()
+    # A chat that already works on a project: a new project needs its own name, and the old goal stays.
+    assert json.loads(ctx.tools["thoth_init"]({"project": str(repo), "goal": "Old goal"}, session_id="s2"))["ok"]
+    monkeypatch.setattr(inst, "session_dir", lambda: str(repo))
+    out = json.loads(ctx.tools["thoth_init"]({"goal": "New thing", "create": True}, session_id="s2"))
+    assert not out["ok"] and "already the Thoth project" in out["error"]
+    assert Brain.open(repo).meta()["goal"] == "Old goal"
+    # A chat in a folder of its own: that folder becomes the project, its files the first version.
+    plain = tmp_path_factory.mktemp("chat") / "shop"
+    plain.mkdir()
+    (plain / "notes.md").write_text("menu")
+    monkeypatch.setattr(inst, "session_dir", lambda: str(plain))
+    out = json.loads(ctx.tools["thoth_init"]({"goal": "A shop page", "create": True}, session_id="s3"))
+    assert out["ok"], out
+    assert (plain / ".thoth" / "brain.db").exists() and "first version" in out["created"]
 
 
 def test_notices_batch_and_skip_what_wait_reports(repo, monkeypatch):
@@ -766,8 +853,10 @@ def test_the_page_shows_each_projects_progress_and_removes_one_without_touching_
     spec = importlib.util.spec_from_file_location("thoth_dash_api_test", ROOT / "dashboard" / "plugin_api.py")
     api = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(api)
-    listed = asyncio.run(api.projects())["projects"]
+    page = asyncio.run(api.projects())
+    listed = page["projects"]
     assert [p["path"] for p in listed] == [str(repo)]
+    assert page["home"].endswith("Thoth")  # where a new project goes, for the page's words
     assert (listed[0]["total"], listed[0]["merged"], listed[0]["waiting"], listed[0]["working"]) == (2, 0, 0, 0)
     asyncio.run(api.action({"action": "forget_project", "project": str(repo)}))
     assert asyncio.run(api.projects())["projects"] == []
@@ -1202,3 +1291,87 @@ def test_autopilot_runs_up_to_8_hours_by_default_and_24_at_most():
     svc = Thoth(mcp_launcher=None)
     assert svc._autopilot_hours() == 8 and svc._autopilot_hours(30) == 24 and svc._autopilot_hours(3) == 3
     assert Thoth(mcp_launcher=None, settings={"autopilot_hours": 12})._autopilot_hours() == 12
+
+
+def test_the_version_lives_in_plugin_yaml_and_the_changelog_says_what_it_brings():
+    import re
+
+    import thoth_core
+    from thoth_core import changelog
+
+    manifest = re.search(r"^version:\s*(\S+)", (ROOT / "plugin.yaml").read_text(), re.M).group(1)
+    assert thoth_core.__version__ == manifest
+    versions = changelog.load()
+    assert versions and versions[0]["version"] == manifest  # a release always says what it brings
+    keys = [changelog.key(e["version"]) for e in versions]
+    assert keys == sorted(keys, reverse=True) and len(set(keys)) == len(keys)  # newest first, each once
+    for entry in versions:
+        assert re.fullmatch(r"\d{4}-\d{2}-\d{2}", entry["date"]) and entry["notes"], entry["version"]
+    out = subprocess.run([sys.executable, "-m", "thoth_core.changelog", manifest], cwd=ROOT, capture_output=True,
+                         text=True, check=True).stdout  # the words of the GitHub release
+    assert out.startswith("- ") and out.strip() == changelog.release_notes(manifest)
+
+
+def test_whats_new_shows_once_after_an_update_and_never_to_a_new_install(tmp_path):
+    from thoth_core import changelog
+
+    notes = tmp_path / "CHANGELOG.md"
+    notes.write_text("# What's new in Thoth\n\n<!-- how to write it -->\n\n"
+                     "## 0.10.0 — 2026-12-01\n\n- **Ten**: one\n  that wraps\n- two `~/x`\n\n"
+                     "## 0.9.0 — 2026-11-08\n\n- nine\n\n## 0.8.0 — 2026-11-07\n\n- eight\n")
+    assert [e["version"] for e in changelog.load(notes)] == ["0.10.0", "0.9.0", "0.8.0"]
+    assert changelog.load(notes)[0]["notes"] == ["**Ten**: one that wraps", "two `~/x`"]
+    assert changelog.key("0.10.0") > changelog.key("0.9.0") and changelog.key("0+unknown") == ()
+    # A new install starts at its own version: nothing to show now, only what comes later.
+    fresh = tmp_path / "fresh"
+    assert changelog.whats_new(fresh, "0.9.0", notes)["unseen"] == []
+    assert json.loads((fresh / "whatsnew.json").read_text()) == {"seen": "0.9.0"}
+    assert [e["version"] for e in changelog.whats_new(fresh, "0.10.0", notes)["unseen"]] == ["0.10.0"]
+    # Someone who used Thoth before it said what's new sees this version's notes until "Got it".
+    used = tmp_path / "used"
+    used.mkdir()
+    (used / "projects.json").write_text("[]")
+    got = changelog.whats_new(used, "0.9.0", notes)
+    assert [e["version"] for e in got["unseen"]] == ["0.9.0"] and not (used / "whatsnew.json").exists()
+    assert [e["version"] for e in got["versions"]] == ["0.10.0", "0.9.0", "0.8.0"]
+    assert changelog.whats_new(used, "0.9.0", notes)["unseen"]  # still there on the next launch
+    changelog.mark_seen(used, "0.9.0")
+    assert changelog.whats_new(used, "0.9.0", notes)["unseen"] == []
+    # Skipped a version: everything newer than the last one seen, up to the one installed, newest first.
+    changelog.mark_seen(used, "0.8.0")
+    assert [e["version"] for e in changelog.whats_new(used, "0.10.0", notes)["unseen"]] == ["0.10.0", "0.9.0"]
+    assert changelog.release_notes("0.10.0", notes) == "- **Ten**: one that wraps\n- two `~/x`"
+    with pytest.raises(KeyError):
+        changelog.release_notes("1.0.0", notes)
+
+
+def test_a_new_install_starts_at_its_own_version(tmp_path, monkeypatch):
+    import thoth_core
+
+    data = tmp_path / "data"
+    monkeypatch.setenv("THOTH_DATA_DIR", str(data))
+    _load_plugin().register(FakeCtx())  # Hermes loads Thoth before anyone starts a project
+    assert json.loads((data / "whatsnew.json").read_text()) == {"seen": thoth_core.__version__}
+
+
+def test_the_page_gets_whats_new_and_got_it_puts_it_away(tmp_path, monkeypatch):
+    pytest.importorskip("fastapi")
+    import asyncio
+
+    import thoth_core
+
+    data = tmp_path / "data"
+    data.mkdir()
+    (data / "chats.json").write_text("{}")  # Thoth was in use before this version
+    monkeypatch.setenv("THOTH_DATA_DIR", str(data))
+    spec = importlib.util.spec_from_file_location("thoth_dash_api_notes", ROOT / "dashboard" / "plugin_api.py")
+    api = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(api)
+    routes = {(r.path, m) for r in api.router.routes for m in getattr(r, "methods", ())}
+    assert {("/whats-new", "GET"), ("/whats-new/seen", "POST")} <= routes
+    got = asyncio.run(api.whats_new())
+    assert got["version"] == thoth_core.__version__
+    assert [e["version"] for e in got["unseen"]] == [thoth_core.__version__] and len(got["unseen"][0]["notes"]) >= 3
+    assert asyncio.run(api.whats_new_seen()) == {"ok": True, "seen": thoth_core.__version__}
+    again = asyncio.run(api.whats_new())
+    assert again["unseen"] == [] and again["versions"][0]["version"] == thoth_core.__version__

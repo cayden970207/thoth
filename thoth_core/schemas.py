@@ -28,10 +28,11 @@ def _obj(props: dict, required: list[str] | None = None) -> dict:
 # Short on purpose: every coordinator call carries these. The playbook lives in the coordinate skill.
 TOOLS: dict[str, tuple[str, dict]] = {
     "thoth_init": (
-        "Start or reopen the shared brain for a project (board, decisions, history in .thoth/). "
-        "For a new project pass create=true: Thoth makes the folder and git repo.",
+        "Start or reopen the shared brain for a project (board, decisions, history in .thoth/). For a new project pass "
+        "create=true and a short folder name as project: Thoth makes it in the user's projects folder (~/Thoth by "
+        "default). A folder of theirs: its full path; Thoth keeps versions there itself.",
         _obj({
-            "project": {"type": "string", "description": "Project folder; other tools default to the chat's folder"},
+            "project": {"type": "string", "description": "A short folder name or a full path; other tools default to the chat's folder"},
             "goal": {"type": "string", "description": "What the team builds"},
             "create": {"type": "boolean"},
             "run": {"type": "string", "description": "Command that starts the app for previews, with {port}. Needs the user's approval"},

@@ -42,18 +42,19 @@ def _core():
     return module
 
 
-def _svc():
-    core = _core()
-    service = importlib.import_module(core.__name__ + ".service")
-    settings = {}
+def _settings() -> dict:
     try:
         from hermes_cli.config import load_config_readonly
 
         cfg = load_config_readonly() or {}
-        settings = (((cfg.get("plugins") or {}).get("entries") or {}).get("thoth") or {}).get("settings") or {}
+        return (((cfg.get("plugins") or {}).get("entries") or {}).get("thoth") or {}).get("settings") or {}
     except Exception:
-        pass
-    return service.Thoth(settings=settings, actor="hermes")
+        return {}
+
+
+def _svc():
+    service = importlib.import_module(_core().__name__ + ".service")
+    return service.Thoth(settings=_settings(), actor="hermes")
 
 
 def _registry():
@@ -112,7 +113,12 @@ async def projects() -> dict[str, Any]:
                     # At a glance in the project switcher: progress, what waits on you, what is running.
                     "total": len(status), "merged": status.count("merged"),
                     "waiting": sum(s in _WAITING for s in status), "working": sum(s in _WORKING for s in status)})
-    return {"projects": out}
+    try:  # where a new project goes, for the words on the page
+        folders = importlib.import_module(_core().__name__ + ".folders")
+        home = folders.tilde(folders.projects_home(_settings().get("projects_dir")))
+    except Exception:
+        home = ""
+    return {"projects": out, "home": home}
 
 
 _WAITING = {"built", "approved", "changes", "failed", "conflict"}
@@ -381,3 +387,25 @@ async def models() -> dict[str, Any]:
     import asyncio
 
     return await asyncio.to_thread(lambda: _svc().models())
+
+
+def _changelog():
+    return importlib.import_module(_core().__name__ + ".changelog")
+
+
+@router.get("/whats-new")
+async def whats_new() -> dict[str, Any]:
+    """What the versions this user hasn't seen bring (shown once, after an update) and every version's notes."""
+    version = getattr(_core(), "__version__", "")
+    try:
+        return _changelog().whats_new(_data_dir(), version)
+    except Exception:
+        return {"version": version, "seen": "", "unseen": [], "versions": []}
+
+
+@router.post("/whats-new/seen")
+async def whats_new_seen() -> dict[str, Any]:
+    """The user read what's new ("Got it"): don't show it again until the next version."""
+    version = getattr(_core(), "__version__", "")
+    _changelog().mark_seen(_data_dir(), version)
+    return {"ok": True, "seen": version}

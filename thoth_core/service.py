@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from . import browser as web
-from . import autopilot, gitops, plans, preview
+from . import autopilot, folders, gitops, keptout, plans, preview
 from .agents import McpSpec, RunState, clean_env, driver_for
 from .brain import NOTE_KINDS, TASK_KINDS, OPEN_RUN_STATUSES, Brain, BrainError, find_brain_root, parse_id, rid, tid
 from .briefing import ago, board_lines, build_brief, parse_report, review_brief, strip_report
@@ -54,11 +54,13 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "notify_on_complete": True,
     "inject_board": True,
     "link_dependencies": True,
+    "copy_kept_out_files": True,
     "dependency_dirs": list(gitops.DEFAULT_DEPENDENCY_DIRS),
     "setup_timeout_seconds": 600,
     "plan_usage": True,
     "autopilot_hours": 8,
     "autopilot_reserve_percent": 20,
+    "projects_dir": folders.DEFAULT_HOME,
 }
 
 Notifier = Callable[[str, dict[str, Any]], None]
@@ -108,21 +110,50 @@ class Thoth:
     # -- project -----------------------------------------------------------------
 
     def init(self, project_dir: str, goal: str = "", setup: str | None = None, create: bool = False, run: str | None = None) -> dict:
+        setting = self.settings.get("projects_dir")
         folder = Path(project_dir).expanduser()
+        if create and not folder.is_absolute() and folder.parts:
+            # A new project named by a short name goes in the projects folder, never next to this process.
+            folder = folders.projects_home(setting) / folder
+        if folder.exists() and not folder.is_dir():
+            raise BrainError(f"{folders.tilde(folder)} is a file, not a folder.")
+        if not folder.exists() and not create:
+            raise BrainError(f"{folders.tilde(folder)} does not exist. To start a new project there, call thoth_init with create=true.")
+        top = gitops.git(folder, "rev-parse", "--show-toplevel", check=False) if folder.exists() else ""
+        # A new project, or a plain folder (also one inside a big folder kept in git, such as a home folder):
+        # Thoth makes its own repository, so it can keep every version.
+        new_repo = not top or (bool(folders.personal(top)) and folders.resolved(top) != folders.resolved(folder))
         made = made_repo = False
-        if create and not folder.exists():
-            folder.mkdir(parents=True)
-            made = True
-        # A new project gets its own repository (also when the new folder sits inside another one).
-        if create and folder.is_dir() and (made or not gitops.git(folder, "rev-parse", "--show-toplevel", check=False)):
+        survey = None
+        if new_repo:
+            why = folders.why_not_new(folder, setting)
+            if why:
+                raise BrainError(self._not_a_project(folder, why))
+            if folder.exists():
+                survey = folders.survey(folder)
+                if survey["too_big"]:
+                    raise BrainError(
+                        f"{folders.tilde(folder)} holds too much to keep every version of it (over "
+                        f"{folders.MAX_FILES:,} files or 1 GB). Start the project in a new folder, or in a folder "
+                        "with just what the agents need.")
+            else:
+                folder.mkdir(parents=True)
+                made = True
             gitops.git(folder, "init", "-q")
             made_repo = True
         root = gitops.repo_root(folder)
+        why = "" if made_repo else folders.personal(root)
+        if why:
+            raise BrainError(self._not_a_project(root, why))
+        gitops.exclude_brain_dir(root)
         created_commit = False
-        if not gitops.has_commits(root):
+        saved = 0
+        if survey is not None and not gitops.has_commits(root):
+            # What is already there becomes the first version, so the agents start from it.
+            saved = gitops.first_version(root, folders.KEEP_OUT, survey["big"], "thoth: the folder as it was")
+        elif not gitops.has_commits(root):
             gitops.ensure_initial_commit(root)
             created_commit = True
-        gitops.exclude_brain_dir(root)
         if find_brain_root(root) == root:
             brain = Brain.open(root)
             if goal:
@@ -139,11 +170,23 @@ class Thoth:
         brain.write_snapshot()
         result = self.status(str(root))
         result["initialized"] = not existed
-        if made_repo:
-            result["created"] = f"Made {'the folder and ' if made else ''}a new git repository at {root}."
+        if made:
+            result["created"] = f"Made the folder and a new git repository at {root}."
+        elif made_repo:
+            left = gitops.ignored_entries(root)
+            result["created"] = (f"Thoth now keeps every version of {root}: it made a git repository there and saved "
+                                 f"the {saved} file{'' if saved == 1 else 's'} in it as the first version."
+                                 + (f" Left out of git, still in the folder: {', '.join(left[:6])}"
+                                    + (f" and {len(left) - 6} more" if len(left) > 6 else "") + "." if left else ""))
         if created_commit:
             result["note"] = "The repository had no commits, so Thoth made an empty initial commit to branch from."
         return result
+
+    def _not_a_project(self, folder: Path, why: str) -> str:
+        home = folders.tilde(folders.projects_home(self.settings.get("projects_dir")))
+        return (f"Thoth won't make {folders.tilde(folder)} a project: {why}. For a new project, call thoth_init with "
+                f"create=true and project set to a short folder name (Thoth makes it in {home}/<name>), or give the "
+                "full path of one project's own folder.")
 
     def open(self, project_dir: str) -> Brain:
         brain = Brain.open(project_dir)
@@ -537,15 +580,31 @@ class Thoth:
         notes = []
         if len(unmerged) > 1:
             notes.append(f"Starts from {unmerged[0]['ref']} with {', '.join(d['ref'] for d in unmerged[1:])} merged in, so every dependency's files are here.")
-        notes += self._prepare_environment(brain, worktree)
+        # What the tasks this one builds on made outside git (a test build, a render) comes along too.
+        sources = []
+        for dep_id in task["depends_on"]:
+            dep = brain.task(dep_id)
+            if dep["worktree"] and Path(dep["worktree"]).is_dir():
+                sources.append((dep["ref"], Path(dep["worktree"])))
+        notes += self._prepare_environment(brain, worktree, sources)
         if notes:
             brain.add_note(kind="handoff", author="thoth", body=" ".join(notes), task_id=task["id"])
         return brain.update_task(task["id"], branch=branch, worktree=str(worktree), base_ref=base_ref, base_commit=base_commit, head_commit=base_commit)
 
-    def _prepare_environment(self, brain: Brain, worktree: Path) -> list[str]:
-        """Give a new worktree what a clean checkout lacks: the project's setup command, or links to its
-        dependency folders. Agents have no network to install them. Never .env files or other secrets."""
+    def _prepare_environment(self, brain: Brain, worktree: Path, sources: list[tuple[str, Path]] | None = None) -> list[str]:
+        """Give a new worktree what a clean checkout lacks: copies of what the project keeps out of git, then the
+        project's setup command or links to its dependency folders. Agents have no network to install them.
+        Never .env files or other secrets."""
         notes: list[str] = []
+        if self.settings.get("copy_kept_out_files", True):
+            try:
+                deps = tuple(self.settings.get("dependency_dirs") or gitops.DEFAULT_DEPENDENCY_DIRS)
+                line = keptout.describe(keptout.bring_in(brain.root, worktree, deps, sources))
+            except Exception:
+                logger.warning("thoth: could not copy what %s keeps out of git into %s", brain.root, worktree, exc_info=True)
+                line = ""
+            if line:
+                notes.append(line)
         setup = (brain.meta().get("setup") or "").strip()
         if setup:
             started = time.time()
@@ -958,18 +1017,54 @@ class Thoth:
                 brain.update_task(other["id"], status="merged", merge_commit=result)
                 brain.event(self.actor, "merged", f"{other['ref']} {other['title']} merged into {base} along with {current['ref']}", task_id=other["id"], commit=result)
                 merged.append(other)
-        if self.settings.get("remove_worktree_on_merge"):
-            for task_row in merged:
-                if task_row["worktree"]:
-                    gitops.remove_worktree(brain.root, Path(task_row["worktree"]))
-                    brain.update_task(task_row["id"], worktree="")
-        return {
+        outside = self._bring_back(brain, merged)
+        out = {
             "task": current["ref"],
             "merged_into": base,
             "commit": result[:12],
             "also_merged": [t["ref"] for t in merged[1:]],
             "board": board_lines(brain),
         }
+        if outside:
+            out["outside_git"] = outside
+        return out
+
+    def _bring_back(self, brain: Brain, merged: list[dict]) -> dict:
+        """After a merge: the new files each task made outside git (test builds, renders) move to the project
+        folder, never over anything there. A task folder that still holds changed copies of the user's files
+        stays, so nothing is lost; the others go when remove_worktree_on_merge is on."""
+        remove = bool(self.settings.get("remove_worktree_on_merge"))
+        deps = tuple(self.settings.get("dependency_dirs") or gitops.DEFAULT_DEPENDENCY_DIRS)
+        outside: dict[str, dict] = {}
+        for task_row in merged:
+            folder = Path(task_row["worktree"]) if task_row["worktree"] else None
+            if not folder or not folder.is_dir():
+                continue
+            new = changed = moved = []
+            if self.settings.get("copy_kept_out_files", True):
+                try:
+                    new, changed = keptout.changes(brain.root, folder, deps)
+                    moved = keptout.bring_back(brain.root, folder, new, keep=not remove or bool(changed))
+                except Exception:
+                    logger.warning("thoth: could not bring back what %s made outside git", task_row["ref"], exc_info=True)
+            placed = set(moved)
+            kept = changed + [rel for rel in new if rel not in placed]
+            if moved or kept:
+                said = []
+                if moved:
+                    said.append(f"Moved {len(moved)} file{'s' if len(moved) != 1 else ''} {task_row['ref']} made outside git into "
+                                f"the project folder: {', '.join(moved[:5])}{' …' if len(moved) > 5 else ''}.")
+                if kept:
+                    said.append(f"{len(kept)} file{'s' if len(kept) != 1 else ''} it changed outside git stay in its task folder "
+                                f"{folders.tilde(folder)}: {', '.join(kept[:5])}{' …' if len(kept) > 5 else ''}. The user's own copies are unchanged.")
+                brain.add_note(kind="context", author="thoth", body=" ".join(said), task_id=task_row["id"])
+                brain.event(self.actor, "outside_git", " ".join(said), task_id=task_row["id"])
+                outside[task_row["ref"]] = {"moved": len(moved), "examples": moved[:5], "kept": kept[:20],
+                                            "kept_in": str(folder) if kept else ""}
+            if remove and not kept:
+                gitops.remove_worktree(brain.root, folder)
+                brain.update_task(task_row["id"], worktree="")
+        return outside
 
     # -- autopilot: the user approves a plan once and Thoth runs it (see autopilot.py) ---------------------
 

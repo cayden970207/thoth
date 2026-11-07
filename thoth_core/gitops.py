@@ -45,7 +45,7 @@ def git(cwd: str | Path, *args: str, check: bool = True, timeout: int = GIT_TIME
 def repo_root(path: str | Path) -> Path:
     out = git(path, "rev-parse", "--show-toplevel", check=False)
     if not out:
-        raise GitError(f"{path} is not inside a git repository. Run `git init` there first (Thoth versions work with git).")
+        raise GitError(f"{path} is not inside a git repository. Call thoth_init there: Thoth makes the repository itself.")
     return Path(out).resolve()
 
 
@@ -70,13 +70,19 @@ def ensure_initial_commit(path: str | Path) -> None:
         git(path, "-c", "user.name=Thoth", "-c", "user.email=thoth@localhost", "commit", "--allow-empty", "--no-verify", "-m", "thoth: initial commit")
 
 
-def exclude_brain_dir(root: Path) -> None:
-    """Keep ``.thoth/`` out of git without touching the user's .gitignore."""
+def _exclude_file(root: Path) -> Path:
+    """The repository's own ignore list (.git/info/exclude): local, never committed, never the user's .gitignore."""
     git_dir = Path(git(root, "rev-parse", "--git-common-dir"))
     if not git_dir.is_absolute():
         git_dir = (root / git_dir).resolve()
     exclude = git_dir / "info" / "exclude"
     exclude.parent.mkdir(parents=True, exist_ok=True)
+    return exclude
+
+
+def exclude_brain_dir(root: Path) -> None:
+    """Keep ``.thoth/`` out of git without touching the user's .gitignore."""
+    exclude = _exclude_file(root)
     line = f"/{BRAIN_DIRNAME}/"
     existing = exclude.read_text(encoding="utf-8") if exclude.exists() else ""
     if line not in existing.splitlines():
@@ -84,6 +90,30 @@ def exclude_brain_dir(root: Path) -> None:
             if existing and not existing.endswith("\n"):
                 fh.write("\n")
             fh.write(f"# Thoth shared brain (local only)\n{line}\n")
+
+
+def _ignore_exactly(rel: str) -> str:
+    """One path as an ignore line that matches only that path (glob characters escaped)."""
+    out = re.sub(r"([*?\[\\])", r"\\\1", rel)
+    if out.endswith(" "):
+        out = out[:-1] + "\\ "
+    return "/" + out
+
+
+def first_version(root: Path, keep_out: tuple[str, ...] | list[str], big: list[str], message: str) -> int:
+    """Commit what is already in a folder Thoth just made a repository for, so agents start from it. Secrets,
+    system files, dependency folders and big files stay in the folder but out of git. Returns the files saved."""
+    exclude = _exclude_file(root)
+    existing = exclude.read_text(encoding="utf-8") if exclude.exists() else ""
+    lines = [*keep_out, *(_ignore_exactly(p) for p in big)]
+    with exclude.open("a", encoding="utf-8") as fh:
+        if existing and not existing.endswith("\n"):
+            fh.write("\n")
+        fh.write("# Thoth: kept out of git, still in the folder (secrets, system files, dependencies, big files)\n")
+        fh.write("\n".join(lines) + "\n")
+    git(root, "add", "-A")
+    git(root, "-c", "user.name=Thoth", "-c", "user.email=thoth@localhost", "commit", "--allow-empty", "--no-verify", "-q", "-m", message)
+    return len([p for p in git(root, "ls-files", "-z").split("\0") if p])
 
 
 def slugify(text: str, limit: int = 32) -> str:
@@ -132,20 +162,17 @@ _EXCLUDE_HEADER = "# Thoth: dependency links inside task worktrees"
 
 def ignored_entries(root: Path) -> list[str]:
     """Ignored, untracked paths in the main checkout; folders end with '/' and are not descended into."""
-    out = git(root, "ls-files", "--others", "--ignored", "--exclude-standard", "--directory", check=False)
-    return [line for line in out.splitlines() if line and not line.startswith((f"{BRAIN_DIRNAME}/", ".git/"))]
+    # NUL-separated: without -z git quotes names outside ASCII ("\346\225\260…"), and they would never match a file.
+    out = git(root, "ls-files", "-z", "--others", "--ignored", "--exclude-standard", "--directory", check=False)
+    return [p for p in out.split("\0") if p and not p.startswith((f"{BRAIN_DIRNAME}/", ".git/"))]
 
 
 def _exclude_exactly(root: Path, rel_paths: list[str]) -> None:
     """Ignore these paths in every worktree, as files or links (a `dir/` pattern does not match a symlink)."""
-    git_dir = Path(git(root, "rev-parse", "--git-common-dir"))
-    if not git_dir.is_absolute():
-        git_dir = (root / git_dir).resolve()
-    exclude = git_dir / "info" / "exclude"
-    exclude.parent.mkdir(parents=True, exist_ok=True)
+    exclude = _exclude_file(root)
     existing = exclude.read_text(encoding="utf-8") if exclude.exists() else ""
     lines = existing.splitlines()
-    new = [f"/{p}" for p in rel_paths if f"/{p}" not in lines]
+    new = [_ignore_exactly(p) for p in rel_paths if _ignore_exactly(p) not in lines]  # "clip [raw].mov" is not a pattern
     if not new:
         return
     with exclude.open("a", encoding="utf-8") as fh:

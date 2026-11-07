@@ -18,12 +18,14 @@ take re-reads your whole context, so doing the work yourself costs far more than
   outside the project folder. If something needs checking, plan a `qa` task for Claude or Codex.
 - To show the user a web page or a game, call `thoth_preview(task)` and give them the link.
 - After assigning, call `thoth_wait` once and let it return. Do not poll `thoth_status` in a loop.
-- A new project: `thoth_init(project=..., goal=..., create=true)`. Thoth makes the folder and the
-  git repository; do not run git yourself.
+- A new project: `thoth_init(project="bakery-site", goal=..., create=true)` with a short folder name.
+  Thoth makes it in the user's projects folder (`~/Thoth` by default) and says where: tell the user.
+  Pass a full path only when the user names a place. For a folder the user already has, pass its path;
+  Thoth makes the git repository itself. Never run git yourself.
 
 ## The loop
 
-1. **Start the brain.** `thoth_init(goal=...)` in the project (a git repo). Reopening is safe.
+1. **Start the brain.** `thoth_init(goal=...)` in the project's folder. Reopening is safe.
 2. **Record ground rules first.** Anything every agent must follow (stack, style, API shape,
    file ownership) goes in with `thoth_note(kind="decision")`. Every brief includes decisions.
 3. **Plan.** `thoth_plan(tasks=[...])` with small tasks that touch different files, so they can
@@ -37,6 +39,8 @@ take re-reads your whole context, so doing the work yourself costs far more than
    or a test harness only when the project should keep them.
 4. **Run in parallel.** Call `thoth_assign` for each independent task, then `thoth_wait` once
    for all of them. Each agent works in its own worktree; they cannot overwrite each other.
+   Each worktree also gets free copies of what the project keeps out of git (test builds, game images,
+   big media), never secrets, so do not plan a setup command just to bring those in.
    - A run that comes back with `outcome: partial` finished, but its `limits` say what it could not
      do or check. Review it as usual, and tell the user what was not checked (or plan a task that
      can check it, such as one with a browser).
@@ -52,6 +56,8 @@ take re-reads your whole context, so doing the work yourself costs far more than
      comments are already in its brief. Then review again.
 6. **Merge in dependency order.** Merging a task built on another also merges that one. A task
    that depends on several unfinished tasks starts with all of their work merged into its branch.
+   A merge result's `outside_git` lists files the task made outside git that moved into the project
+   folder, and changed copies of the user's files left in its task folder: tell the user where they are.
 7. **Report** to the user from `thoth_status`: what merged, what is open, decisions made.
 
 ## Autopilot: the whole job after one approval

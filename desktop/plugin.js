@@ -92,7 +92,9 @@ let projectsAt = 0
 async function loadProjects (force = false) {
   if (!force && Date.now() - projectsAt < 8000) return
   projectsAt = Date.now()
-  const list = (await ctxRef.rest('/projects')).projects || []
+  const got = await ctxRef.rest('/projects')
+  const list = (got && got.projects) || []
+  if (got && got.home) store.projectsHome = got.home
   // A backend that is still starting can answer with no projects: keep the ones we know.
   if (!list.length && store.projects.length) return
   if (!list.length) {
@@ -121,6 +123,7 @@ async function refresh () {
   try {
     const first = !store.projects.length || !store.project
     await loadProjects(first)
+    loadNotes()
     if (first) {
       const saved = ctxRef.storage && ctxRef.storage.get ? await ctxRef.storage.get('project') : ''
       store.project = (store.projects.find(p => p.path === saved) || store.projects[0] || {}).path || ''
@@ -1257,6 +1260,71 @@ function Keys ({ onClose }) {
       rows.map(([k, l]) => h('div', { key: k, className: 'th-keys-row' }, h('span', null, l), h('span', null, k.split(' ').map(x => h('kbd', { key: x, className: 'th-kbd' }, x)))))))
 }
 
+/* ------------------------------------------------------------------ what's new */
+// After an update, what the versions this user hasn't seen bring, once (CHANGELOG.md, read by the backend).
+// "Got it" puts it away on every surface; the version beside "Thoth" at the top, or the project menu, brings
+// every version's notes back.
+let notesAsked = false
+async function loadNotes () {
+  if (notesAsked || !ctxRef) return
+  notesAsked = true
+  try { store.notes = await ctxRef.rest('/whats-new'); emit() } catch (err) { notesAsked = false }
+}
+async function notesSeen () {
+  if (!store.notes) return
+  store.notes = { ...store.notes, unseen: [] }
+  emit()
+  try { await ctxRef.rest('/whats-new/seen', { method: 'POST', body: {} }) } catch (err) {}
+}
+// The page, the side window and Team & brain each show the list themselves: it opens where it was asked for.
+function openNotes (where) { store.notesOpen = where; emit() }
+const shortVersion = v => String(v || '').replace(/^(\d+\.\d+)\.0$/, '$1')
+function noteDate (day) {
+  const t = Date.parse(String(day || '') + 'T12:00:00')
+  return isNaN(t) ? String(day || '') : new Date(t).toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' })
+}
+// A note's Markdown as text: **bold** and `code` only, never HTML.
+function noteText (text) {
+  return String(text).split(/(\*\*[^*]+\*\*|`[^`]+`)/).filter(Boolean).map((part, i) =>
+    /^\*\*[^*]+\*\*$/.test(part) ? h('b', { key: i }, part.slice(2, -2))
+      : /^`[^`]+`$/.test(part) ? h('code', { key: i }, part.slice(1, -1)) : part)
+}
+function WhatsNew ({ where }) {
+  const s = useStore()
+  const n = s.notes
+  if (!n || !(n.unseen || []).length) return null
+  const all = n.unseen.flatMap(e => e.notes || [])
+  const shown = all.slice(0, 3), more = all.length - shown.length
+  return h('section', { className: 'th-whatsnew', 'aria-label': 'What’s new in Thoth' },
+    h('div', { className: 'th-wnhead' },
+      h('b', { className: 'th-wntitle' }, 'What’s new in Thoth ', h('span', null, shortVersion(n.version))),
+      h('button', { className: 'th-linkbtn', onClick: () => openNotes(where) }, more ? `See ${more} more` : 'Every version'),
+      h('button', { className: 'th-btn th-sm th-primary', onClick: notesSeen }, 'Got it')),
+    h('ul', { className: 'th-wnlist' }, shown.map((t, i) => h('li', { key: i }, noteText(t)))))
+}
+function VersionTag ({ where }) {
+  const s = useStore()
+  if (!s.notes || !s.notes.version) return null
+  return h('button', { className: 'th-vtag', title: 'What’s new in Thoth', 'aria-label': `Thoth ${s.notes.version}: what’s new`, onClick: () => openNotes(where) }, shortVersion(s.notes.version))
+}
+function NotesDialog () {
+  const s = useStore()
+  const close = () => { store.notesOpen = ''; emit() }
+  useEffect(() => {
+    const esc = e => { if (e.key === 'Escape') { e.stopPropagation(); close() } }
+    addEventListener('keydown', esc, true)
+    return () => removeEventListener('keydown', esc, true)
+  }, [])
+  const n = s.notes || {}
+  return h('div', { className: 'th-keys th-noteswrap', onClick: close },
+    h('div', { className: 'th-keys-card th-notes', role: 'dialog', 'aria-modal': true, 'aria-label': 'What’s new in Thoth', onClick: e => e.stopPropagation() },
+      h('div', { className: 'th-noteshead' }, h('div', { className: 'th-conn-title' }, 'What’s new in Thoth'),
+        h('button', { className: 'th-ib', title: 'Close (Esc)', 'aria-label': 'Close', autoFocus: true, onClick: close }, h(Icon, { name: 'x', size: 14 }))),
+      h('div', { className: 'th-notesbody' }, (n.versions || []).map(e => h('section', { key: e.version, className: 'th-notesv' },
+        h('div', { className: 'th-notesvh' }, h('b', null, 'Thoth ' + shortVersion(e.version)), e.version === n.version ? h('em', null, 'Installed') : null, h('span', null, noteDate(e.date))),
+        h('ul', { className: 'th-wnlist' }, (e.notes || []).map((t, i) => h('li', { key: i }, noteText(t)))))))))
+}
+
 function OutputTile ({ task, path, size = 86 }) {
   if (PHOTO.test(path)) return h(Thumb, { task, path, size })
   if (VIDEO.test(path)) return h('span', { className: 'th-otile th-otile-video', style: { width: size, height: size } }, h(Icon, { name: 'play', size: Math.round(size * 0.26), fill: true }))
@@ -1392,10 +1460,10 @@ function ThothPage () {
       h('h2', null, offline || s.reconnecting ? 'Reconnecting to Hermes…' : s.error ? 'Thoth can’t reach its backend' : first ? 'Agents working as one team' : 'Loading the team…'),
       h('p', null, offline ? 'Its backend is starting up. Thoth comes back by itself in a moment.' : s.error ? s.error + '. Make sure the Thoth plugin is enabled in Capabilities → Plugins.' : first ? 'Each keeps its own harness. Hermes plans; the real Claude Code and Codex build side by side on your own logins and review each other, and every decision and version stays with the project.' : ''),
       first ? h('ol', { className: 'th-onb' },
-        h('li', null, h('b', null, 'Open a chat in a git project'), h('span', null, 'Any folder with git works — code, a game, docs.')),
-        h('li', null, h('b', null, 'Tell Hermes the goal'), h('span', null, '“Make a tiny pixel game: Codex draws the sprites, Claude builds it.”')),
+        h('li', null, h('b', null, 'Say what to build'), h('span', null, '“A tiny pixel game: Codex draws the sprites, Claude builds it.”')),
+        h('li', null, h('b', null, 'Thoth sets up the project'), h('span', null, `A new folder in ${s.projectsHome || '~/Thoth'} that keeps every version. To work in a folder you already have, open a Hermes chat there and ask.`)),
         h('li', null, h('b', null, 'Approve and watch'), h('span', null, 'You approve each agent launch; this page shows them working live.'))) : null,
-      first ? h('button', { className: 'th-btn th-primary', style: { marginTop: 18 }, onClick: async () => { const w = await sendToHermes('Start a Thoth brain for the project in this chat\'s folder, ask me for the goal, then plan it for Claude Code and Codex.'); if (!w) host.notify({ kind: 'warning', message: 'Open a Hermes chat first' }) } }, 'Start in Hermes') : null))
+      first ? h(NewProject, { autoFocus: false }) : null))
   }
   const snap = s.snap, d = derive(snap)
   const sel = selected || ((snap.needs || [])[0] || {}).task || ((snap.tasks || [])[0] || {}).ref || ''
@@ -1408,8 +1476,8 @@ function ThothPage () {
   const nextCoord = { hermes: 'claude', claude: 'codex', codex: 'hermes' }[coord]
   return h('div', { className: 'th-root' }, css,
     h('header', { className: 'th-topbar' },
-      h('div', { className: 'th-crumbs' }, 'Thoth', h('span', null, '/'),
-        s.projects.length > 1 ? h(ProjectSwitcher, { s, current: project }) : h('b', null, project.name),
+      h('div', { className: 'th-crumbs' }, 'Thoth', h(VersionTag, { where: 'page' }), h('span', null, '/'),
+        s.projects.length ? h(ProjectSwitcher, { s, current: project, where: 'page' }) : h('b', null, project.name),
         h('span', { className: 'th-mono th-muted' }, snap.meta.base_branch)),
       h('span', { className: 'th-sync' + (busy ? '' : ' th-idle') }, h(Icon, { name: 'sync', size: 14 }), busy ? 'Syncing live' : 'Up to date'),
       h('button', { className: 'th-chip', title: 'Open this project’s chat with Thoth beside it', onClick: openBeside }, h(Icon, { name: 'layers', size: 14 }), 'Beside the chat'),
@@ -1417,6 +1485,7 @@ function ThothPage () {
       h('button', { className: 'th-chip', title: 'Hand coordination to ' + AGENTS[nextCoord].name, onClick: () => act({ action: 'coordinator', agent: nextCoord }, r => `${AGENTS[r.coordinator].name} coordinates now. Hermes can print the setup command.`) },
         h(Mini, { agent: coord, size: 18 }), AGENTS[coord].name, h('span', { className: 'th-chipk' }, 'coordinates'))),
     h('div', { className: 'th-content' },
+      h(WhatsNew, { where: 'page' }),
       (() => {
         let ask = null
         try { ask = JSON.parse(snap.meta.pending_approval || 'null') } catch (e) {}
@@ -1455,6 +1524,7 @@ function ThothPage () {
             h('button', { className: 'th-closeI', onClick: () => setOpen(false), 'aria-label': 'Close panel' }, h(Icon, { name: 'x' }))),
           h(Inspector, { snap, d, selected: sel, tab, setTab }))),
       keys ? h(Keys, { onClose: () => setKeys(false) }) : null,
+      s.notesOpen === 'page' ? h(NotesDialog) : null,
       s.viewer ? h(Viewer, { v: s.viewer, snap, close: () => { store.viewer = null; emit() } }) : null),
     h(CommandBar, { snap, project, d }))
 }
@@ -1488,7 +1558,7 @@ function SideHead ({ s, snap, onFull, team = false }) {
   const tasks = snap.tasks || [], merged = tasks.filter(t => t.status === 'merged').length
   const busy = Object.values(snap.agents || {}).some(a => a.busy)
   return h('header', { className: 'th-sidehead' },
-    s.projects.length > 1 ? h(ProjectSwitcher, { s, current: project, side: true }) : h('b', { className: 'th-sidename' }, project.name),
+    s.projects.length ? h(ProjectSwitcher, { s, current: project, side: true, where: team ? 'side' : 'activity' }) : h('b', { className: 'th-sidename' }, project.name),
     h('span', { className: 'th-muted' }, `${merged} of ${tasks.length} shipped`),
     h('span', { className: 'th-sync' + (busy ? '' : ' th-idle') }, h(Icon, { name: 'sync', size: 13 }), busy ? 'Live' : 'Up to date'),
     h('span', { className: 'th-ospacer' }),
@@ -1643,6 +1713,7 @@ function ThothSide () {
   return h('div', { className: 'th-root th-side', ref: root, onKeyDown: onKey }, css,
     h(SideHead, { s, snap, team: true, onFull: () => host.navigate('/thoth') }),
     h('div', { className: 'th-sidebody' },
+      h(WhatsNew, { where: 'side' }),
       h(SideAsk, { snap, chat }),
       h(ChatLink, { snap, chat }),
       h(AutopilotBar, { snap }),
@@ -1673,7 +1744,8 @@ function ThothSide () {
                 h('button', { className: 'th-ib', title: 'Close' + (wide ? ' (Esc)' : ''), 'aria-label': 'Close', onClick: close }, h(Icon, { name: 'x', size: 15 }))),
               h('div', { key: 'i', className: 'th-inspector th-sheetbody' }, h(Inspector, { snap, d, selected: sel, tab: 'task', setTab: () => {} }))
             ])),
-      s.viewer ? h(Viewer, { v: s.viewer, snap, close: () => { store.viewer = null; emit() } }) : null))
+      s.viewer ? h(Viewer, { v: s.viewer, snap, close: () => { store.viewer = null; emit() } }) : null,
+      s.notesOpen === 'side' ? h(NotesDialog) : null))
 }
 
 // Team & brain belongs next to Thoth. Hermes remembers a closed pane (a plugin reload can close it too), so the
@@ -1704,7 +1776,8 @@ function ThothActivity () {
       h(Roster, { snap }),
       h('div', { className: 'th-card th-widget th-brainw' },
         h('div', { className: 'th-wlabel' }, h('span', null, 'Shared brain'), h('span', null, 'decisions, reviews and versions')),
-        h(BrainFeed, { snap, d, onTask: select }))))
+        h(BrainFeed, { snap, d, onTask: select }))),
+    s.notesOpen === 'activity' ? h(NotesDialog) : null)
 }
 
 const pause = ms => new Promise(r => setTimeout(r, ms))
@@ -1723,7 +1796,12 @@ async function sendToHermes (text) {
       if (focusedStored() === own.stored && host.composer && host.composer.submit(own.stored, text)) return { where: 'same', session: focusedChat(), stored: own.stored }
     }
   }
-  if (ctxRef.runAction) {
+  return newChatWith(text, true)
+}
+// A new chat whose first message is this: a new tab when the host has them, else a new chat, else a draft.
+async function newChatWith (text, tabs = false) {
+  const runtime0 = focusedChat()
+  if (tabs && ctxRef.runAction) {
     let opened = null
     try { opened = await ctxRef.runAction('session.newTab') } catch (e) {}
     if (opened && opened.ok !== false) {
@@ -1741,6 +1819,35 @@ async function sendToHermes (text) {
   }
   if (host.composer && await host.composer.setDraft(null, text)) return { where: 'draft', session: null }
   return { where: '', session: null }
+}
+// A new project starts in a chat of its own, which becomes the project's chat once Hermes sets the project up.
+async function startProject (goal) {
+  const text = String(goal || '').trim()
+  if (!text) return false
+  const r = await newChatWith('Start a new Thoth project: ' + text, true)
+  if (r.where === 'draft') host.notify({ kind: 'info', message: 'Press send in the new chat to start the project' })
+  else if (!r.where) host.notify({ kind: 'warning', message: 'Open a Hermes chat first' })
+  return !!r.where
+}
+function NewProject ({ onDone, onCancel, autoFocus = true }) {
+  const [goal, setGoal] = useState('')
+  const [busy, setBusy] = useState(false)
+  const go = async () => {
+    if (!goal.trim() || busy) return
+    setBusy(true)
+    const ok = await startProject(goal)
+    setBusy(false)
+    if (ok) { setGoal(''); if (onDone) onDone() }
+  }
+  return h('form', { className: 'th-newproj', onSubmit: e => { e.preventDefault(); go() } },
+    h('label', null, h('b', null, 'What should the team build?'),
+      h('textarea', { className: 'th-textarea', rows: 2, value: goal, autoFocus, placeholder: 'e.g. A one-page site for my bakery, with photos of the cakes',
+        onChange: e => setGoal(e.target.value),
+        onKeyDown: e => { if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); go() } } })),
+    h('div', { className: 'th-revise-foot' },
+      h('span', null, `Hermes sets it up in a new chat, in a folder in ${store.projectsHome || '~/Thoth'}.`),
+      onCancel ? h('button', { type: 'button', className: 'th-btn th-sm', onClick: onCancel }, 'Cancel') : null,
+      h('button', { type: 'submit', className: 'th-btn th-sm th-primary', disabled: busy || !goal.trim() }, busy ? 'Starting…' : 'Start')))
 }
 function openChat (session) {
   // The chat Hermes uses for this project, as a tab next to the Thoth page.
@@ -2218,15 +2325,16 @@ const progressBits = p => p.total === undefined ? [] : [
   p.waiting ? [`${p.waiting} need${p.waiting === 1 ? 's' : ''} you`, 'th-pf-you'] : null,
   p.working ? [`${p.working} working`, 'th-pf-live'] : null
 ].filter(Boolean)
-function ProjectSwitcher ({ s, current, side = false }) {
+function ProjectSwitcher ({ s, current, side = false, where = 'page' }) {
   const [open, setOpen] = useState(false)
   const [asking, setAsking] = useState('')
+  const [making, setMaking] = useState(false)
   const ref = useRef(null)
   useEffect(() => {
     if (!open) return
     listHermesProjects(true).then(emit)
-    const close = e => { if (ref.current && !ref.current.contains(e.target)) { setOpen(false); setAsking('') } }
-    const esc = e => { if (e.key === 'Escape') { setOpen(false); setAsking('') } }
+    const close = e => { if (ref.current && !ref.current.contains(e.target)) { setOpen(false); setAsking(''); setMaking(false) } }
+    const esc = e => { if (e.key === 'Escape') { setOpen(false); setAsking(''); setMaking(false) } }
     addEventListener('pointerdown', close); addEventListener('keydown', esc)
     return () => { removeEventListener('pointerdown', close); removeEventListener('keydown', esc) }
   }, [open])
@@ -2257,7 +2365,11 @@ function ProjectSwitcher ({ s, current, side = false }) {
               h('span', { className: 'th-projgoal' }, p.goal || 'No goal yet'),
               h('span', { className: 'th-projfacts' }, progressBits(p).map(([text, cls], i) => h('em', { key: i, className: cls }, text)))),
             p.path !== s.project ? h('button', { className: 'th-ib th-projx', title: 'Remove from Thoth', 'aria-label': 'Remove ' + p.name + ' from Thoth', onClick: () => setAsking(p.path) }, h(Icon, { name: 'x', size: 13 })) : null)),
-      h('div', { className: 'th-projhint' }, (hidden ? `${hidden} archived in Hermes. ` : '') + 'Rename, recolour or archive a project in Hermes’s sidebar; Thoth follows.')) : null)
+      making
+        ? h(NewProject, { onDone: () => { setMaking(false); setOpen(false) }, onCancel: () => setMaking(false) })
+        : h('button', { role: 'menuitem', className: 'th-newit', onClick: () => { setAsking(''); setMaking(true) } }, h(Icon, { name: 'plus', size: 14 }), 'New project'),
+      h('div', { className: 'th-projhint' }, (hidden ? `${hidden} archived in Hermes. ` : '') + 'Rename, recolour or archive a project in Hermes’s sidebar; Thoth follows.',
+        s.notes && s.notes.version ? h('button', { className: 'th-linkbtn th-projver', onClick: () => { setOpen(false); setAsking(''); setMaking(false); openNotes(where) } }, `Thoth ${s.notes.version} · What’s new`) : null)) : null)
 }
 
 function StatusChip () {
@@ -2417,7 +2529,7 @@ height:100%;display:flex;flex-direction:column;color:var(--th-text);font-size:13
 .th-dele{display:flex;gap:8px;align-items:center;padding:7px 0;border-bottom:1px solid var(--th-line);font-size:12.5px}.th-dele:last-child{border-bottom:0}
 .th-dele-st{display:inline-flex;align-items:center;gap:4px;margin-left:8px;font-size:11px;color:var(--th-t3)}
 .th-switch{position:relative;display:inline-flex}
-.th-projmenu{min-width:320px;max-width:400px;max-height:min(70vh,520px);overflow-y:auto}
+.th-projmenu{min-width:320px;max-width:400px;max-height:min(70vh,520px);overflow-y:auto;white-space:normal}
 .th-projrow{position:relative;border-radius:10px}
 .th-projrow .th-projit{display:flex!important;flex-direction:column;align-items:flex-start;gap:2px;padding-right:38px!important}
 .th-projrow.th-on .th-projit{background:var(--th-sunken)}
@@ -2430,6 +2542,10 @@ height:100%;display:flex;flex-direction:column;color:var(--th-text);font-size:13
 .th-projrow:hover .th-projx,.th-projx:focus-visible{opacity:1}
 .th-projask{display:flex;align-items:center;flex-wrap:wrap;gap:8px;padding:9px 10px;border-radius:10px;background:var(--th-sunken);font-size:12px;color:var(--th-t2);line-height:1.4}
 .th-projask>span{flex:1 1 180px;min-width:0}.th-projask b{color:var(--th-text);font-weight:600}
+.th-newit{display:flex;align-items:center;gap:8px;width:100%;padding:8px 10px!important;border-radius:10px;color:var(--th-t2)!important;font-weight:600;font-size:12.5px}.th-newit:hover{background:var(--th-sunken);color:var(--th-text)!important}
+.th-newproj{display:grid;gap:8px;padding:10px;border-radius:12px;background:var(--th-sunken)}.th-newproj label{display:grid;gap:6px}.th-newproj label b{font-size:12.5px;font-weight:600}
+.th-newproj .th-textarea{min-height:0;resize:none;font-size:13px}.th-newproj .th-revise-foot{margin-top:0}
+.th-emptypage .th-newproj{max-width:420px;margin:20px auto 0;text-align:left;background:var(--th-panel);border:1px solid var(--th-line);box-shadow:var(--th-shadow)}
 .th-projhint{margin-top:4px;padding:8px 10px 4px;border-top:1px solid var(--th-line);font-size:11.5px;line-height:1.4;color:var(--th-t4)}
 .th-switch-btn{display:inline-flex;align-items:center;gap:6px;padding:3px 8px;margin:-3px -4px;border-radius:8px;color:var(--th-text)}.th-switch-btn:hover{background:var(--th-hover)}
 .th-menu{position:absolute;top:calc(100% + 8px);left:-8px;z-index:30;min-width:300px;max-width:380px;padding:6px;background:var(--th-panel);border:1px solid var(--th-line);border-radius:14px;box-shadow:var(--th-lift);animation:th-rise .35s var(--th-spring)}
@@ -2942,6 +3058,28 @@ textarea.th-cmd-input{resize:none;line-height:1.45;padding:4px 0;max-height:120p
 .th-root .th-cmd-chip{border:0!important;background:color-mix(in srgb,var(--th-panel) 80%,transparent)!important;box-shadow:0 0 0 1px var(--th-line);height:30px;padding:0 13px}
 .th-root .th-composer .th-cmd-box{border:0;border-radius:26px;box-shadow:var(--th-lift);padding:7px 7px 7px 10px}
 .th-root .th-cmd-box:focus-within{border-color:transparent;box-shadow:0 0 0 2px var(--th-select),var(--th-lift)}
+/* what's new: once after an update; every version's notes behind the version number */
+.th-root .th-whatsnew{flex-shrink:0;padding:11px 11px 12px 18px;border-radius:20px;background:var(--th-panel);box-shadow:var(--th-shadow);animation:th-rise .4s var(--th-spring)}
+.th-wnhead{display:flex;align-items:center;gap:14px;flex-wrap:wrap}
+.th-wntitle{flex:1;min-width:0;font-size:13.5px;font-weight:650;letter-spacing:-.01em}
+.th-wntitle span{color:var(--th-t3);font-weight:550}
+.th-wnlist{margin:2px 0 0;padding:0 0 0 16px;display:grid;gap:3px;font-size:12.5px;line-height:1.45;color:var(--th-t2)}
+.th-wnlist li::marker{color:var(--th-t4)}
+.th-wnlist b{color:var(--th-text);font-weight:600}
+.th-wnlist code{font-family:var(--font-mono,ui-monospace,Menlo,monospace);font-size:11.5px;padding:0 4px;border-radius:5px;background:var(--th-sunken);color:var(--th-text)}
+.th-root .th-vtag{height:20px;padding:0 7px;margin-left:-3px;border-radius:999px;font-size:11px;font-weight:600;color:var(--th-t3);background:var(--th-sunken)}
+.th-root .th-vtag:hover{color:var(--th-text)}
+.th-root .th-noteswrap{grid-template-rows:minmax(0,1fr);grid-template-columns:minmax(0,1fr)}
+.th-root .th-notes{width:min(460px,calc(100% - 32px));max-height:min(640px,calc(100% - 48px));display:flex;flex-direction:column;padding:14px 6px 6px 18px;border:0;border-radius:24px}
+.th-noteshead{display:flex;align-items:center;justify-content:space-between;padding-right:8px}
+.th-notesbody{overflow-y:auto;min-height:0;padding:0 12px 8px 0}
+.th-notesv{padding:12px 0 10px;border-top:1px solid var(--th-line)}
+.th-notesv:first-child{border-top:0;padding-top:6px}
+.th-notesvh{display:flex;align-items:baseline;gap:8px;font-size:12.5px;margin-bottom:3px}
+.th-notesvh b{font-weight:650;color:var(--th-text)}
+.th-notesvh em{font-style:normal;font-size:11px;font-weight:600;color:var(--th-ok)}
+.th-notesvh span{margin-left:auto;font-size:11.5px;color:var(--th-t4)}
+.th-projver{display:block;margin-top:6px}
 @media (prefers-reduced-motion:reduce){.th-root *,.th-root *::before,.th-root *::after{animation-duration:.001ms!important;animation-iteration-count:1!important;transition-duration:.001ms!important}}
 `
 
