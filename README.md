@@ -349,7 +349,11 @@ hermes plugins doctor . --ci
 `thoth_core/` is plain Python with no third-party dependencies, shared by the Hermes plugin
 (`__init__.py`) and the MCP server (`mcp_server.py`).
 
-MIT License.
+## License
+
+Thoth is open source under the [MIT License](LICENSE). You can use, change and share it, commercially
+too, as long as copies keep the copyright and license notice. The license covers Thoth's own code, not
+the Claude, Codex and Hermes marks described next.
 
 ## Trademarks
 
