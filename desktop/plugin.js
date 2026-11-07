@@ -1458,9 +1458,35 @@ function TeamDots ({ snap }) {
   const agents = snap.agents || {}, workers = snap.workers || {}
   const busy = order.filter(a => agents[a] && agents[a].busy)
   const label = (busy.length ? busy.map(a => AGENTS[a].name).join(' and ') + (busy.length > 1 ? ' are' : ' is') + ' working. ' : '') + 'Open Team & brain'
-  return h('button', { className: 'th-teamdots', onClick: showTeam, title: label, 'aria-label': label },
-    h('span', { className: 'th-teamstack' }, order.map(a => h('span', { key: a, className: 'th-tdot' + (agents[a] && agents[a].busy ? ' th-busy' : '') + (workers[a] && !workers[a].ready ? ' th-tdot-off' : '') + (snap.plans && snap.plans[a] && snap.plans[a].limited_until ? ' th-tdot-out' : ''), style: { '--c': AGENTS[a].color } }, h(Mini, { agent: a, size: 22 })))),
+  const plans = snap.plans  // with plan usage on, each agent shows how much of its plan is used beside its face
+  const dot = a => h('span', { key: a, className: 'th-tdot' + (agents[a] && agents[a].busy ? ' th-busy' : '') + (workers[a] && !workers[a].ready ? ' th-tdot-off' : '') + (plans && plans[a] && plans[a].limited_until ? ' th-tdot-out' : ''), style: { '--c': AGENTS[a].color } }, h(Mini, { agent: a, size: 22 }))
+  return h('button', { className: 'th-teamdots' + (plans ? ' th-teamplans' : ''), onClick: showTeam, title: label, 'aria-label': label },
+    plans
+      ? order.map(a => h('span', { key: a, className: 'th-tmember' }, dot(a), a !== 'hermes' && !(workers[a] && !workers[a].ready) ? h(MiniPlan, { agent: a, v: plans[a] }) : null))
+      : h('span', { className: 'th-teamstack' }, order.map(dot)),
     busy.length ? h('span', { className: 'th-teamlive', style: { '--c': AGENTS[busy[0]].color } }, h('i', { className: 'th-pulse' }), busy.length + ' working') : null)
+}
+
+// An agent's plan in a glance: its fullest window as a short meter and a number; amber when low, red with the
+// time it is back when it has run out. The whole sentence is in the tooltip; Team & brain has the details.
+function MiniPlan ({ agent, v }) {
+  const name = AGENTS[agent].name
+  if (!v || (!v.windows.length && !v.limited_until)) {
+    return h('span', { className: 'th-mplan th-mplan-wait', title: agent === 'claude' ? `${name}'s plan usage shows after its next run` : `Checking ${name}'s plan…` },
+      h('i', { className: 'th-mmeter' }), h('b', null, '–'))
+  }
+  if (v.limited_until) {
+    return h('span', { className: 'th-mplan th-mplan-spent', title: `${name} has hit its plan limit. It's back ${clockAt(v.limited_until)}.` },
+      h('i', { className: 'th-mmeter' }, h('i', { style: { width: '100%' } })), h('b', null, 'back in ' + soon(v.limited_until)))
+  }
+  const w = v.windows.reduce((a, b) => (b.used > a.used ? b : a))
+  const pct = Math.round(w.used * 100), low = w.used >= 0.85
+  const stale = v.source === 'run' && Date.now() / 1000 - (v.seen_at || 0) > 3 * 3600
+  const tip = `${name}: ${pct}% of its ${w.label.toLowerCase()} limit used${low ? ', running low' : ''}` + (w.resets_at ? `, resets in ${soon(w.resets_at)}` : '') +
+    (v.source === 'run' ? ` (from a run ${ago(v.seen_at)})` : '')
+  return h('span', { className: 'th-mplan' + (low ? ' th-mplan-low' : ''), title: tip },
+    h('i', { className: 'th-mmeter' }, h('i', { style: { width: (pct ? Math.max(4, pct) : 0) + '%' } })),
+    low ? h(Icon, { name: 'alert', size: 11 }) : null, h('b', null, (stale ? '≈' : '') + pct + '%'))
 }
 
 function SideAsk ({ snap, chat }) {
@@ -2491,6 +2517,16 @@ height:100%;display:flex;flex-direction:column;color:var(--th-text);font-size:13
 .th-tdot.th-busy{z-index:1;box-shadow:0 0 0 2px var(--th-bg),0 0 0 3.5px var(--c)}
 .th-tdot-off .th-mini{opacity:.4;filter:grayscale(1)}
 .th-teamlive{display:inline-flex;align-items:center;gap:6px}
+/* With plan usage: each face with a short meter and a number beside it. */
+.th-teamplans{gap:12px;padding:0 10px 0 5px}
+.th-tmember{display:inline-flex;align-items:center;gap:7px}
+.th-teamplans .th-tdot{margin-left:0}
+.th-mplan{display:inline-flex;align-items:center;gap:5px;font-size:11.5px;font-weight:600;color:var(--th-t2);font-variant-numeric:tabular-nums;white-space:nowrap}
+.th-mmeter{position:relative;display:inline-block;width:34px;height:4px;border-radius:99px;background:color-mix(in srgb,var(--th-blue) 22%,transparent);overflow:hidden}
+.th-mmeter>i{position:absolute;left:0;top:0;bottom:0;border-radius:99px;background:var(--th-blue)}
+.th-mplan-low{color:var(--th-amber-tx)}.th-mplan-low .th-mmeter{background:color-mix(in srgb,var(--th-amber) 26%,transparent)}.th-mplan-low .th-mmeter>i{background:var(--th-amber)}
+.th-mplan-spent{color:var(--th-red-tx)}.th-mplan-spent .th-mmeter{background:color-mix(in srgb,var(--th-red) 24%,transparent)}.th-mplan-spent .th-mmeter>i{background:var(--th-red)}
+.th-mplan-wait{color:var(--th-t4)}.th-mplan-wait .th-mmeter{background:var(--th-line2)}
 .th-hermeswork{position:absolute;top:12px;left:14px;z-index:6;display:flex;align-items:center;gap:7px;height:30px;padding:0 12px 0 5px;border-radius:999px;background:var(--th-panel);box-shadow:var(--th-shadow);font-size:12px;font-weight:600;color:var(--th-text);animation:th-pop .35s var(--th-spring)}
 .th-dots{display:inline-flex;gap:3px}.th-dots b{width:4px;height:4px;border-radius:50%;background:var(--th-t3);animation:th-breathe 1.2s ease-in-out infinite}.th-dots b:nth-child(2){animation-delay:.2s}.th-dots b:nth-child(3){animation-delay:.4s}
 @keyframes th-pop{from{opacity:0;transform:translateY(-4px) scale(.96)}to{opacity:1;transform:none}}
