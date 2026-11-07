@@ -738,3 +738,52 @@ def test_the_plugin_remembers_which_chat_talks_about_which_project(repo, tmp_pat
     assert chats.project_of(tmp_path, "chat-1") == str(repo)
     inst._session_projects.clear()  # as after a restart: the chat still knows its project
     assert inst.project_for({}, "chat-1") == str(repo)
+
+
+def test_thoth_lists_its_projects_most_recent_first_and_can_forget_one(tmp_path):
+    from thoth_core import projects as registry
+    registry.remember(tmp_path, "/p/a")
+    registry.remember(tmp_path, "/p/b")
+    registry.remember(tmp_path, "/p/a")
+    assert registry.load(tmp_path) == ["/p/a", "/p/b"]
+    assert registry.forget(tmp_path, "/p/b") and not registry.forget(tmp_path, "/p/b")
+    assert registry.load(tmp_path) == ["/p/a"]
+    for i in range(registry.MAX_PROJECTS + 5):
+        registry.remember(tmp_path, f"/p/{i}")
+    assert len(registry.load(tmp_path)) == registry.MAX_PROJECTS
+
+
+def test_the_page_shows_each_projects_progress_and_removes_one_without_touching_it(repo):
+    pytest.importorskip("fastapi")
+    import asyncio
+    plugin = _load_plugin()
+    ctx = FakeCtx()
+    plugin.register(ctx)
+    json.loads(ctx.tools["thoth_init"]({"project": str(repo), "goal": "A tiny CRM"}, session_id="s0"))
+    Thoth(mcp_launcher=None).plan(str(repo), [{"title": "Build UI", "agent": "claude"}, {"title": "Write tests", "agent": "codex"}])
+    spec = importlib.util.spec_from_file_location("thoth_dash_api_test", ROOT / "dashboard" / "plugin_api.py")
+    api = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(api)
+    listed = asyncio.run(api.projects())["projects"]
+    assert [p["path"] for p in listed] == [str(repo)]
+    assert (listed[0]["total"], listed[0]["merged"], listed[0]["waiting"], listed[0]["working"]) == (2, 0, 0, 0)
+    asyncio.run(api.action({"action": "forget_project", "project": str(repo)}))
+    assert asyncio.run(api.projects())["projects"] == []
+    assert (repo / ".thoth" / "brain.db").is_file()  # off the list only: the brain stays
+
+
+def test_a_chat_that_names_a_project_is_about_that_project(repo, tmp_path, monkeypatch):
+    plugin = _load_plugin()
+    ctx = FakeCtx()
+    plugin.register(ctx)
+    json.loads(ctx.tools["thoth_init"]({"project": str(repo), "goal": "A tiny CRM"}, session_id="s0"))
+    hook = ctx.hooks["pre_llm_call"]
+    inst = hook.__self__
+    other = tmp_path / "ab"  # a short, plain name never counts as a mention
+    monkeypatch.setattr(inst, "_known_projects", lambda: [str(repo), str(other)])
+    monkeypatch.setattr(inst, "session_dir", lambda: "")
+    out = hook(session_id="chat-n1", user_message=f"Quick update on {repo.name.upper()}: what's left?")
+    assert out and f"({repo})" in out["context"] and "few short lines" not in out["context"]
+    assert inst.project_for({}, "chat-n1") == str(repo)
+    assert hook(session_id="chat-n2", user_message=f"is {repo.name}x related?") is None  # part of a longer word
+    assert hook(session_id="chat-n3", user_message="what about ab?") is None

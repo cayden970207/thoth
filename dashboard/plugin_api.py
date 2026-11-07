@@ -12,7 +12,6 @@ served, so the page cannot be pointed at an arbitrary folder.
 from __future__ import annotations
 
 import importlib.util
-import json
 import sys
 from pathlib import Path
 from typing import Any
@@ -57,15 +56,16 @@ def _svc():
     return service.Thoth(settings=settings, actor="hermes")
 
 
+def _registry():
+    return importlib.import_module(_core().__name__ + ".projects")
+
+
 def _projects() -> list[str]:
     try:
-        from plugins.plugin_storage import plugin_data_dir
-
-        path = plugin_data_dir("thoth") / "projects.json"
-        data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else []
+        data = _registry().load(_data_dir())
     except Exception:
         data = []
-    return [p for p in data if isinstance(p, str) and (Path(p) / ".thoth" / "brain.db").is_file()]
+    return [p for p in data if (Path(p) / ".thoth" / "brain.db").is_file()]
 
 
 def _data_dir() -> Path:
@@ -103,11 +103,20 @@ async def projects() -> dict[str, Any]:
     out = []
     for p in _projects():
         try:
-            meta = _core_brain(p).meta()
+            brain = _core_brain(p)
+            meta, tasks = brain.meta(), brain.tasks()
         except Exception:
-            meta = {}
-        out.append({"path": p, "name": Path(p).name, "goal": meta.get("goal", ""), "coordinator": meta.get("coordinator", "hermes")})
+            meta, tasks = {}, []
+        status = [str(t.get("status") or "") for t in tasks]
+        out.append({"path": p, "name": Path(p).name, "goal": meta.get("goal", ""), "coordinator": meta.get("coordinator", "hermes"),
+                    # At a glance in the project switcher: progress, what waits on you, what is running.
+                    "total": len(status), "merged": status.count("merged"),
+                    "waiting": sum(s in _WAITING for s in status), "working": sum(s in _WORKING for s in status)})
     return {"projects": out}
+
+
+_WAITING = {"built", "approved", "changes", "failed", "conflict"}
+_WORKING = {"running", "reviewing"}
 
 
 def _core_brain(project: str):
@@ -169,6 +178,10 @@ async def action(body: dict) -> dict[str, Any]:
                                      kind=str(body.get("kind") or ""), role=str(body.get("role") or ""),
                                      model=body.get("model") if "model" in body else None, effort=body.get("effort") if "effort" in body else None,
                                      browser=str(body.get("browser")) if "browser" in body else None)
+        elif kind == "forget_project":
+            # "Remove from Thoth": off the list only; the folder and its .thoth brain stay as they are.
+            _registry().forget(_data_dir(), path)
+            result = {"project": path, "removed": True}
         elif kind == "bind_chat":
             # The page sent this project's request to that chat (or opened it for this project).
             for sid in [str(body.get("session") or ""), str(body.get("alt") or "")]:

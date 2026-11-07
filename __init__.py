@@ -26,6 +26,7 @@ from typing import Any
 from .thoth_core import __version__
 from .thoth_core import browser as web
 from .thoth_core import chats
+from .thoth_core import projects as registry
 from .thoth_core.agents import driver_for
 from .thoth_core.brain import Brain, BrainError, find_brain_root, parse_id
 from .thoth_core.briefing import board_lines
@@ -137,13 +138,10 @@ class ThothPlugin:
         except Exception:
             logger.debug("thoth: could not record the chat for %s", root, exc_info=True)
 
-    @staticmethod
-    def _known_projects() -> list[str]:
+    @classmethod
+    def _known_projects(cls) -> list[str]:
         try:
-            from plugins.plugin_storage import plugin_data_dir
-
-            path = plugin_data_dir("thoth") / "projects.json"
-            return [str(p) for p in json.loads(path.read_text(encoding="utf-8"))] if path.exists() else []
+            return registry.load(cls._data_dir())
         except Exception:
             return []
 
@@ -162,6 +160,26 @@ class ThothPlugin:
                 return str(root)
         return ""
 
+    def _named_project(self, message: Any) -> str:
+        """A project Thoth knows that the message names by its folder name ("what's left in tiny-crm?"), as a
+        brain root, else "". Only distinctive names count (5+ letters, or a hyphen, underscore or digit), and a
+        message naming two projects is left to the model."""
+        if isinstance(message, list):  # content parts
+            message = " ".join(str(p.get("text") or "") for p in message if isinstance(p, dict))
+        text = message if isinstance(message, str) else ""
+        if not text:
+            return ""
+        hits: list[str] = []
+        for path in self._known_projects():
+            name = Path(path).name
+            if len(name) < 5 and not re.search(r"[-_\d]", name):
+                continue
+            if re.search(rf"(?<![\w-]){re.escape(name)}(?![\w-])", text, re.IGNORECASE):
+                root = find_brain_root(path)
+                if root is not None and str(root) not in hits:
+                    hits.append(str(root))
+        return hits[0] if len(hits) == 1 else ""
+
     def remember(self, project: str) -> None:
         root = find_brain_root(project) if project else None
         if root is None:
@@ -172,14 +190,7 @@ class ThothPlugin:
             pass
         # The Desktop page only serves projects listed here (most recent first).
         try:
-            from plugins.plugin_storage import plugin_data_dir
-
-            path = plugin_data_dir("thoth") / "projects.json"
-            known = json.loads(path.read_text(encoding="utf-8")) if path.exists() else []
-            known = [str(root)] + [p for p in known if p != str(root)]
-            tmp = path.with_suffix(".tmp")
-            tmp.write_text(json.dumps(known[:20], indent=2), encoding="utf-8")
-            tmp.replace(path)
+            registry.remember(self._data_dir(), root)
         except Exception:
             logger.debug("thoth: could not record the project", exc_info=True)
 
@@ -456,10 +467,12 @@ class ThothPlugin:
             return None
         # A request typed on the Thoth page ends with "— via Thoth · <project>": bind this chat to that project.
         from_page = self._page_project(user_message)
-        if from_page and session_id:
-            self.bind_chat(session_id, from_page)
+        # A chat that names a project ("what's left in tiny-crm?") is about that project from now on.
+        named = "" if from_page else self._named_project(user_message)
+        if (from_page or named) and session_id:
+            self.bind_chat(session_id, from_page or named)
         here = self.session_dir()
-        root = Path(from_page) if from_page else (find_brain_root(here) if here else None)
+        root = Path(from_page or named) if (from_page or named) else (find_brain_root(here) if here else None)
         if root is None:
             with self._lock:
                 known = self._session_projects.get(session_id or "")

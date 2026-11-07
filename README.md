@@ -194,6 +194,17 @@ terminal never hides it. Click a task and a small card rises from the bottom wit
 and action, while the canvas stays in view; **All details** grows it in place, and Esc or a click on the
 canvas puts it away. Once the window is wide enough, the details open in a column beside the canvas instead.
 
+**One project, one place in Hermes.** Every Thoth project is also a Hermes project on the same folder. The
+first time Thoth shows a project it creates that Hermes project (named after the folder, in the project's
+colour, or reuses the one you already have there) and moves the project's chat into the folder, the same as
+Hermes's own *Move to project*. Hermes's sidebar then files the project's chats under it, Hermes works in that
+folder, and every chat you open there is about that project. The side window follows whichever project the
+chat on screen belongs to, and picking a project in Thoth's switcher opens its chat. If the chat on screen is
+about something else, a one-line note offers the project's own chat, or starts one. The switcher shows each
+project's progress and what waits on you; rename, recolour or archive projects in Hermes's sidebar (an
+archived project drops out of the switcher), and **Remove from Thoth** takes one off Thoth's list without
+touching its folder.
+
 **Seeing the result.** Every task that made a web page or a browser game gets an **Open preview** button
 on the Thoth page (and Hermes has `thoth_preview`). Thoth serves that task's folder on `127.0.0.1`, read-only, never hidden files such
 as `.env`. The **Outputs** view collects everything the team made that you can look at — images, video, sound,
@@ -308,8 +319,11 @@ environment passthrough.
   and Team & brain) and one layout template, **Chat + Thoth**, which changes your layout only when you pick
   it. Closing a pane only hides it, and Layout → Reset brings it back. The first time Thoth sends
   a project's request it opens a chat for that project, then pins that chat and gives it the project's colour,
-  once (unpin it and it stays unpinned). Which chat belongs to which project is kept in the plugin's data folder
-  (`chats.json`: session ids and project paths only).
+  once (unpin it and it stays unpinned). For each Thoth project it creates a Hermes project on that project's
+  folder (or reuses yours) and moves the project's chat into the folder, through Hermes's own project calls;
+  your other projects and chats are left alone. Which chat belongs to which project, and which projects Thoth
+  lists, is kept in the plugin's data folder (`chats.json` and `projects.json`: session ids and project paths
+  only). Hermes reopens Team & brain beside the side window once per session.
 - **Web browsing, only for tasks you give a browser**: the agent's CLI starts `npx -y chrome-devtools-mcp@1.2.0`
   (Google's Chrome DevTools MCP server, downloaded from npm on first use and pinned to that exact version,
   which has no dependencies of its own) with `--no-usage-statistics --no-performance-crux --redactNetworkHeaders`.

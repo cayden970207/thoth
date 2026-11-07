@@ -129,6 +129,7 @@ async function refresh () {
       store.snap = await ctxRef.rest('/snapshot?project=' + encodeURIComponent(store.project))
       announce(store.snap)
       store.error = ''
+      homeOnce(store.project)
     }
   } catch (err) {
     store.error = (err && err.message) || String(err)
@@ -823,7 +824,13 @@ function Canvas ({ snap, d, selected, select, project, inset = 0, onBackground =
           all.some(t => t.status === 'merged' && ((snap.meta.run || '').trim() || hasPage(d.byTask[t.id]))) ? h('button', { className: 'th-tag th-tagbtn', title: 'Open everything merged so far in your browser', onClick: e => { e.stopPropagation(); openPreview('') } }, h(Icon, { name: 'play', size: 10 }), ' Open') : null),
         h('div', { key: 'f', className: 'th-node-ft' },
           (() => { const ready = tasks.filter(t => t.status === 'approved').length; return h(StatusPill, { status: ready ? 'approved' : 'todo', label: ready ? ready + ' ready to merge' : 'Waiting' }) })(),
-          h('span', { className: 'th-node-meta' }, 'needs your OK'))
+          // Say what Main waits on: your OK only when something is ready, otherwise the tasks still on their way.
+          (() => {
+            const ready = all.some(t => t.status === 'approved')
+            const open = all.filter(t => !['merged', 'cancelled', 'approved'].includes(t.status)).map(t => t.ref)
+            const meta = ready ? 'needs your OK' : open.length ? 'for ' + (open.length > 3 ? open.slice(0, 2).join(', ') + ' +' + (open.length - 2) : open.join(', ')) : 'all merged'
+            return h('span', { className: 'th-node-meta' }, meta)
+          })())
       ], { stack: folding }),
       tasks.flatMap(t => {
         const dl = d.byTask[t.id].delegations
@@ -1323,13 +1330,23 @@ function ThothPage () {
 function useChatProject () {
   const stored = useAtom(host.state && host.state.focusedStoredSessionId)
   const runtime = useAtom(host.state && host.state.focusedSessionId)
+  const cwd = useAtom(host.state && host.state.cwd)
+  const known = store.projects.length
   useEffect(() => {
-    if (!ctxRef || (!stored && !runtime)) return
+    if (!ctxRef) return
+    // A chat working in a project's folder (Hermes files it under that project) is about that project.
+    const here = cwd ? store.projects.filter(p => samePath(cwd, p.path) || String(cwd).startsWith(p.path.replace(/\/+$/, '') + '/')).sort((a, b) => b.path.length - a.path.length)[0] : null
+    if (here) { if (here.path !== store.project) switchProject(here.path); return }
+    if (!stored && !runtime) return
     let gone = false
     ctxRef.rest(`/chat?session=${encodeURIComponent(stored || '')}&alt=${encodeURIComponent(runtime || '')}`)
-      .then(r => { if (!gone && r && r.project && r.project !== store.project) switchProject(r.project) }).catch(() => {})
+      .then(r => {
+        if (gone) return
+        store.chatProject = (r && r.project) || ''
+        if (r && r.project && r.project !== store.project) switchProject(r.project); else emit()
+      }).catch(() => {})
     return () => { gone = true }
-  }, [stored, runtime])
+  }, [stored, runtime, cwd, known])
   return stored || runtime || ''
 }
 
@@ -1338,7 +1355,7 @@ function SideHead ({ s, snap, onFull, team = false }) {
   const tasks = snap.tasks || [], merged = tasks.filter(t => t.status === 'merged').length
   const busy = Object.values(snap.agents || {}).some(a => a.busy)
   return h('header', { className: 'th-sidehead' },
-    s.projects.length > 1 ? h(ProjectSwitcher, { s, current: project }) : h('b', { className: 'th-sidename' }, project.name),
+    s.projects.length > 1 ? h(ProjectSwitcher, { s, current: project, side: true }) : h('b', { className: 'th-sidename' }, project.name),
     h('span', { className: 'th-muted' }, `${merged} of ${tasks.length} shipped`),
     h('span', { className: 'th-sync' + (busy ? '' : ' th-idle') }, h(Icon, { name: 'sync', size: 13 }), busy ? 'Live' : 'Up to date'),
     h('span', { className: 'th-ospacer' }),
@@ -1370,6 +1387,39 @@ function SideAsk ({ snap, chat }) {
     here ? null : h('button', { className: 'th-btn th-sm th-primary', onClick: () => openChat(ask.session) }, 'Open chat'))
 }
 
+// How a request from Thoth names its project on its last line: the folder name, or the full path when two
+// projects share a folder name.
+const pageTag = path => {
+  const base = String(path || '').split('/').filter(Boolean).pop() || ''
+  return (store.projects || []).filter(p => (p.path || '').split('/').pop() === base).length > 1 ? path : base
+}
+async function startProjectChat (path) {
+  const name = pageTag(path)
+  const r = await sendToHermes(`Let's pick up ${name}: where does it stand, and what needs me first?\n\n— via Thoth · ${name}`)
+  if (!r.where) { host.notify({ kind: 'warning', message: 'Open a Hermes chat, then try again' }); return }
+  if (r.where === 'draft') { host.notify({ kind: 'info', message: 'Put in the Hermes composer — press Enter to send' }); return }
+  rememberChat(path, r.stored, r.session, r.fresh)
+}
+// The board beside a chat should be that chat's project. When they differ (an unrelated chat is open, or another
+// project was picked in the switcher), one click brings back the project's own chat, or starts one for it.
+function ChatLink ({ snap, chat }) {
+  const cwd = useAtom(host.state && host.state.cwd)
+  const [own, setOwn] = useState(undefined)
+  const path = snap.project
+  useEffect(() => { let gone = false; setOwn(undefined); projectChat(path).then(o => { if (!gone) setOwn(o || null) }).catch(() => { if (!gone) setOwn(null) }); return () => { gone = true } }, [path, chat])
+  if (own === undefined || !path) return null
+  const inside = !!cwd && (samePath(cwd, path) || String(cwd).startsWith(path.replace(/\/+$/, '') + '/'))
+  const mine = !!own && ((own.stored && own.stored === focusedStored()) || (own.runtime && own.runtime === focusedChat()))
+  if (inside || mine || store.chatProject === path) return null
+  const name = path.split('/').filter(Boolean).pop()
+  return h('div', { className: 'th-chatlink', role: 'status' },
+    h(Icon, { name: 'layers', size: 14 }),
+    h('span', null, own && own.stored ? `This chat isn’t about ${name}.` : `${name} has no chat yet.`),
+    own && own.stored
+      ? h('button', { className: 'th-btn th-sm', onClick: () => { try { host.openSession(own.stored, { intent: 'tab' }) } catch (e) {} } }, `Open ${name}’s chat`)
+      : h('button', { className: 'th-btn th-sm', onClick: () => startProjectChat(path) }, 'Start a chat'))
+}
+
 // Beside the chat the side window is narrow. Picking a task raises a small card from the bottom (what it is,
 // where it stands, the next step) while the canvas and the picked card stay in view; "All details" grows it into
 // the full inspector, Esc or a click on the canvas puts it away. A wide side window shows the details as a
@@ -1387,7 +1437,7 @@ function ThothSide () {
   const [wide, setWide] = useState(false)
   const [sheetH, setSheetH] = useState(0)
   const root = useRef(null), sheet = useRef(null)
-  useEffect(() => { refresh(); followHermes() }, [])
+  useEffect(() => { refresh(); followHermes(); keepTeamTab() }, [])
   useEffect(() => { if (sheet.current) sheet.current.scrollTop = 0 }, [selected, full])
   // Keyboard focus follows the card, so Esc steps back from wherever the last click left it.
   useEffect(() => { if (open && sheet.current) { try { sheet.current.focus({ preventScroll: true }) } catch (e) {} } }, [open, full, selected])
@@ -1435,6 +1485,7 @@ function ThothSide () {
     h(SideHead, { s, snap, team: true, onFull: () => host.navigate('/thoth') }),
     h('div', { className: 'th-sidebody' },
       h(SideAsk, { snap, chat }),
+      h(ChatLink, { snap, chat }),
       needs.length ? h('div', { className: 'th-card th-sideneed' }, h(NeedRow, { n: needs[0], select, next: true, inline: true }),
         needs.length > 1 ? h('button', { className: 'th-linkbtn th-sidemore', title: 'See everything that needs you in Team & brain', onClick: showTeam }, '+' + (needs.length - 1) + ' more') : null) : null,
       h('section', { className: 'th-sidews' + (open ? ' th-open' : '') + (wide ? ' th-wide' : '') + (full ? ' th-full' : '') },
@@ -1462,6 +1513,15 @@ function ThothSide () {
               h('div', { key: 'i', className: 'th-inspector th-sheetbody' }, h(Inspector, { snap, d, selected: sel, tab: 'task', setTab: () => {} }))
             ])),
       s.viewer ? h(Viewer, { v: s.viewer, snap, close: () => { store.viewer = null; emit() } }) : null))
+}
+
+// Team & brain belongs next to Thoth. Hermes remembers a closed pane (a plugin reload can close it too), so the
+// first time the side window shows in a session, Team & brain is put back beside it, without taking the front.
+let teamTabKept = false
+function keepTeamTab () {
+  if (teamTabKept || typeof host.undismissPane !== 'function') return
+  teamTabKept = true
+  try { host.undismissPane('thoth:activity') } catch (e) {}
 }
 
 // Team & brain, the tab beside the Thoth side window: the project in numbers, what needs you, who is on the
@@ -1550,6 +1610,67 @@ async function projectChat (project = store.project) {
 }
 const PROJECT_COLORS = ['#D9774F', '#2F6FEB', '#13893F', '#6B52D6', '#B86E00', '#0E7C86']
 const projectColor = p => { let n = 0; for (const c of String(p)) n = (n * 31 + c.charCodeAt(0)) >>> 0; return PROJECT_COLORS[n % PROJECT_COLORS.length] }
+
+// Each Thoth project lives in a Hermes project on the same folder, so Hermes's sidebar files the project's chats
+// under it and its chats work in that folder. Hermes keeps the project itself (name, colour, archiving); Thoth
+// creates it once, the first time it shows the project, and finds it again by its folder.
+const samePath = (a, b) => !!a && !!b && String(a).replace(/\/+$/, '') === String(b).replace(/\/+$/, '')
+const ownsFolder = (p, root) => samePath(p.primary_path, root) || (p.folders || []).some(f => samePath(f.path, root))
+let hermesProjects = null, hermesProjectsAt = 0
+async function listHermesProjects (force = false) {
+  if (typeof host.request !== 'function') return []
+  if (!force && hermesProjects && Date.now() - hermesProjectsAt < 15000) return hermesProjects
+  try { const r = await host.request('projects.list', {}); hermesProjects = (r && r.projects) || []; hermesProjectsAt = Date.now() } catch (e) { hermesProjects = hermesProjects || [] }
+  return hermesProjects
+}
+const hermesProjectOf = root => (hermesProjects || []).find(p => ownsFolder(p, root)) || null
+async function ensureHermesProject (root, goal = '') {
+  if (!root || typeof host.request !== 'function') return null
+  let p = (await listHermesProjects()).find(x => ownsFolder(x, root))
+  if (p) return p
+  try {
+    const made = await host.request('projects.create', { name: root.split('/').filter(Boolean).pop() || 'Project', folders: [root], primary_path: root, description: goal ? String(goal).slice(0, 240) : undefined, color: projectColor(root) })
+    p = made && made.project
+    if (p) hermesProjects = [...(hermesProjects || []), p]
+  } catch (e) {
+    p = (await listHermesProjects(true)).find(x => ownsFolder(x, root)) || null // made meanwhile, by Hermes or another window
+  }
+  return p
+}
+// The project's chat moves into the project's folder — what Hermes's own "Move to project" does. A chat that is
+// answering can't move yet; it moves when the answer is done (followHermes retries on every finished answer).
+const homing = {}
+let homingNow = false
+async function tryHomes () {
+  if (homingNow || typeof host.request !== 'function') return
+  homingNow = true
+  try {
+    for (const [stored, root] of Object.entries(homing)) {
+      try {
+        await host.request('session.workspace.move', { session_key: stored, cwd: root })
+        delete homing[stored]
+        try { ctxRef.storage.set('home:' + stored, root) } catch (e) {}
+      } catch (e) {
+        const why = String((e && ((e.data && e.data.reason) || e.message)) || '')
+        if (!/busy|running/i.test(why)) delete homing[stored] // gone, or on another machine: it stays where it is
+      }
+    }
+  } finally { homingNow = false }
+}
+async function homeProject (root, stored = '') {
+  if (!root || !ctxRef) return
+  const info = store.projects.find(p => p.path === root) || {}
+  if (!(await ensureHermesProject(root, info.goal))) return
+  if (!stored) { const own = await projectChat(root); stored = own && own.stored }
+  if (!stored) return
+  let home = ''
+  try { home = await ctxRef.storage.get('home:' + stored) } catch (e) {}
+  if (home === root) return
+  homing[stored] = root
+  tryHomes()
+}
+const homed = new Set()
+const homeOnce = root => { if (root && !homed.has(root)) { homed.add(root); homeProject(root) } }
 async function rememberChat (project, stored, runtime, fresh) {
   // A brand-new chat gets its durable id once Hermes has saved it; Thoth's backend learns it from the first message.
   for (let i = 0; fresh && !stored && i < 25; i++) {
@@ -1559,6 +1680,7 @@ async function rememberChat (project, stored, runtime, fresh) {
   if (!ctxRef || (!stored && !runtime)) return
   try { ctxRef.storage.set('chat2:' + project, JSON.stringify({ stored: stored || '', runtime: runtime || '' })) } catch (e) {}
   ctxRef.rest('/action', { method: 'POST', body: { action: 'bind_chat', project, session: stored || runtime, alt: stored ? (runtime || '') : '', primary: true } }).catch(() => {})
+  if (stored) homeProject(project, stored)
   if (!stored || !host.sessions) return
   // The project's chat sits pinned at the top of the sidebar, in the project's colour — once: if you unpin it, it stays unpinned.
   let done = ''
@@ -1601,14 +1723,37 @@ function followHermes () {
       const name = String((ev && ev.payload && ev.payload.name) || '').replace(/^mcp__\w+__/, '')
       if (name.startsWith('thoth_') && here(ev)) { store.hermes = { doing: HERMES_DOING[name] || 'working', at: Date.now() }; emit() }
     }),
+    // A Thoth tool just changed the board (or started a project in this chat): show it now, not on the next poll.
+    on('tool.complete', ev => {
+      const name = String((ev && ev.payload && ev.payload.name) || '').replace(/^mcp__\w+__/, '')
+      if (name.startsWith('thoth_') && here(ev)) { refreshSoon(); followChatSoon() }
+    }),
     on('message.complete', ev => {
+      if (Object.keys(homing).length) setTimeout(tryHomes, 800)
       if (!here(ev)) return
+      followChatSoon()
       const refs = [...new Set(String((ev && ev.payload && ev.payload.text) || '').match(/\bT\d{1,3}\b/g) || [])]
       store.hermes = null
       if (refs.length) { store.mention = { refs, at: Date.now() }; setTimeout(emit, 6200) }
       emit()
     }),
   ].filter(off => typeof off === 'function')
+}
+// The chat on screen may have just started (or switched to) a project: the side window follows it, and the
+// project gets its Hermes project with this chat moved into its folder.
+let followTimer = 0
+const followChatSoon = () => { clearTimeout(followTimer); followTimer = setTimeout(followChatProject, 500) }
+async function followChatProject () {
+  const stored = focusedStored(), runtime = focusedChat()
+  if (!ctxRef || (!stored && !runtime)) return
+  try {
+    await loadProjects(true)
+    const r = await ctxRef.rest(`/chat?session=${encodeURIComponent(stored || '')}&alt=${encodeURIComponent(runtime || '')}`)
+    store.chatProject = (r && r.project) || ''
+    if (!r || !r.project) return
+    if (r.project !== store.project) switchProject(r.project); else emit()
+    homeProject(r.project)
+  } catch (e) {}
 }
 const mentioned = ref => !!(store.mention && Date.now() - store.mention.at < 6000 && store.mention.refs.includes(ref))
 function HermesAtWork () {
@@ -1662,8 +1807,7 @@ function CommandBar ({ snap, project, d }) {
     setSending(true)
     // Your words come first (they name the chat); the last line tells Hermes which project, by folder name
     // unless two projects share it.
-    const base = (snap.project || '').split('/').filter(Boolean).pop() || project.name
-    const tag = (store.projects || []).filter(p => (p.path || '').split('/').pop() === base).length > 1 ? snap.project : base
+    const tag = pageTag(snap.project) || project.name
     const project0 = snap.project
     const { where, session, stored, fresh } = await sendToHermes(`${body}\n\n— via Thoth · ${tag}`)
     setSending(false)
@@ -1905,21 +2049,54 @@ function Connect () {
       h('div', { className: 'th-conn-foot' }, h(Icon, { name: 'eye', size: 12 }), ' Runs also appear in each app’s own history as “Thoth · T1 …”')) : null)
 }
 
-function ProjectSwitcher ({ s, current }) {
+// Every Thoth project at a glance: progress, what waits on you, who is working. Beside the chat, picking one also
+// opens that project's chat, so the conversation and the board always show the same project. A project archived
+// in Hermes's sidebar drops out of the list; "Remove from Thoth" takes one off it without touching its folder.
+const progressBits = p => p.total === undefined ? [] : [
+  [p.total ? `${p.merged || 0} of ${p.total} shipped` : 'No tasks yet', ''],
+  p.waiting ? [`${p.waiting} need${p.waiting === 1 ? 's' : ''} you`, 'th-pf-you'] : null,
+  p.working ? [`${p.working} working`, 'th-pf-live'] : null
+].filter(Boolean)
+function ProjectSwitcher ({ s, current, side = false }) {
   const [open, setOpen] = useState(false)
+  const [asking, setAsking] = useState('')
   const ref = useRef(null)
   useEffect(() => {
     if (!open) return
-    const close = e => { if (ref.current && !ref.current.contains(e.target)) setOpen(false) }
-    const esc = e => { if (e.key === 'Escape') setOpen(false) }
+    listHermesProjects(true).then(emit)
+    const close = e => { if (ref.current && !ref.current.contains(e.target)) { setOpen(false); setAsking('') } }
+    const esc = e => { if (e.key === 'Escape') { setOpen(false); setAsking('') } }
     addEventListener('pointerdown', close); addEventListener('keydown', esc)
     return () => { removeEventListener('pointerdown', close); removeEventListener('keydown', esc) }
   }, [open])
-  const pick = path => { setOpen(false); switchProject(path) }
+  const pick = async path => {
+    setOpen(false); setAsking('')
+    switchProject(path)
+    if (!side || typeof host.openSession !== 'function') return
+    const own = await projectChat(path)
+    if (own && own.stored) { try { host.openSession(own.stored, { intent: 'tab' }) } catch (e) {} }
+  }
+  const forget = p => act({ action: 'forget_project', project: p.path }, () => `${p.name} is off Thoth’s list. Its folder and brain are untouched.`)
+    .then(() => { setAsking(''); return loadProjects(true) }).then(emit)
+  const archived = root => { const hp = hermesProjectOf(root); return !!(hp && hp.archived) }
+  const shown = s.projects.filter(p => p.path === s.project || !archived(p.path))
+  const hidden = s.projects.length - shown.length
+  const dot = p => { const hp = hermesProjectOf(p.path); return (hp && hp.color) || projectColor(p.path) }
   return h('span', { className: 'th-switch', ref },
-    h('button', { className: 'th-switch-btn', onClick: () => setOpen(o => !o), 'aria-expanded': open }, h('b', null, current.name), h('svg', { width: 12, height: 12, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 2.2, strokeLinecap: 'round' }, h('path', { d: 'M7 10l5 5 5-5' }))),
-    open ? h('div', { className: 'th-menu', role: 'menu' }, s.projects.map(p => h('button', { key: p.path, role: 'menuitem', className: 'th-menu-it' + (p.path === s.project ? ' th-on' : ''), onClick: () => pick(p.path) },
-      h('b', null, p.name), h('span', null, p.goal || 'No goal yet'), h(Mini, { agent: AGENTS[p.coordinator] ? p.coordinator : 'hermes', size: 18 })))) : null)
+    h('button', { className: 'th-switch-btn', onClick: () => setOpen(o => !o), 'aria-expanded': open, 'aria-haspopup': 'menu' }, h('b', null, current.name), h('svg', { width: 12, height: 12, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 2.2, strokeLinecap: 'round' }, h('path', { d: 'M7 10l5 5 5-5' }))),
+    open ? h('div', { className: 'th-menu th-projmenu', role: 'menu' },
+      shown.map(p => asking === p.path
+        ? h('div', { key: p.path, className: 'th-projask', role: 'alertdialog', 'aria-label': 'Remove ' + p.name },
+            h('span', null, h('b', null, 'Remove ' + p.name + ' from Thoth?'), ' Its folder and brain stay as they are.'),
+            h('button', { className: 'th-btn th-sm th-primary', onClick: () => forget(p) }, 'Remove'),
+            h('button', { className: 'th-btn th-sm', onClick: () => setAsking('') }, 'Keep'))
+        : h('div', { key: p.path, className: 'th-projrow' + (p.path === s.project ? ' th-on' : '') },
+            h('button', { role: 'menuitem', className: 'th-menu-it th-projit', onClick: () => pick(p.path) },
+              h('span', { className: 'th-projname' }, h('i', { className: 'th-projdot', style: { background: dot(p) } }), h('b', null, p.name)),
+              h('span', { className: 'th-projgoal' }, p.goal || 'No goal yet'),
+              h('span', { className: 'th-projfacts' }, progressBits(p).map(([text, cls], i) => h('em', { key: i, className: cls }, text)))),
+            p.path !== s.project ? h('button', { className: 'th-ib th-projx', title: 'Remove from Thoth', 'aria-label': 'Remove ' + p.name + ' from Thoth', onClick: () => setAsking(p.path) }, h(Icon, { name: 'x', size: 13 })) : null)),
+      h('div', { className: 'th-projhint' }, (hidden ? `${hidden} archived in Hermes. ` : '') + 'Rename, recolour or archive a project in Hermes’s sidebar; Thoth follows.')) : null)
 }
 
 function StatusChip () {
@@ -2079,6 +2256,20 @@ height:100%;display:flex;flex-direction:column;color:var(--th-text);font-size:13
 .th-dele{display:flex;gap:8px;align-items:center;padding:7px 0;border-bottom:1px solid var(--th-line);font-size:12.5px}.th-dele:last-child{border-bottom:0}
 .th-dele-st{display:inline-flex;align-items:center;gap:4px;margin-left:8px;font-size:11px;color:var(--th-t3)}
 .th-switch{position:relative;display:inline-flex}
+.th-projmenu{min-width:320px;max-width:400px;max-height:min(70vh,520px);overflow-y:auto}
+.th-projrow{position:relative;border-radius:10px}
+.th-projrow .th-projit{display:flex!important;flex-direction:column;align-items:flex-start;gap:2px;padding-right:38px!important}
+.th-projrow.th-on .th-projit{background:var(--th-sunken)}
+.th-projname{display:inline-flex;align-items:center;gap:7px;min-width:0}.th-projname b{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.th-projdot{width:8px;height:8px;border-radius:50%;flex-shrink:0}
+.th-projrow .th-projgoal{display:block;max-width:100%;padding-left:15px;font-size:12px;color:var(--th-t3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.th-projfacts{display:flex;flex-wrap:wrap;gap:0 10px;padding-left:15px;font-size:11.5px;color:var(--th-t4)}
+.th-projfacts em{font-style:normal}.th-projfacts .th-pf-you{color:var(--th-warn);font-weight:600}.th-projfacts .th-pf-live{color:var(--th-hermes);font-weight:600}
+.th-projx{position:absolute;top:8px;right:6px;width:26px;height:26px;border-radius:50%;opacity:0;transition:opacity .15s}
+.th-projrow:hover .th-projx,.th-projx:focus-visible{opacity:1}
+.th-projask{display:flex;align-items:center;flex-wrap:wrap;gap:8px;padding:9px 10px;border-radius:10px;background:var(--th-sunken);font-size:12px;color:var(--th-t2);line-height:1.4}
+.th-projask>span{flex:1 1 180px;min-width:0}.th-projask b{color:var(--th-text);font-weight:600}
+.th-projhint{margin-top:4px;padding:8px 10px 4px;border-top:1px solid var(--th-line);font-size:11.5px;line-height:1.4;color:var(--th-t4)}
 .th-switch-btn{display:inline-flex;align-items:center;gap:6px;padding:3px 8px;margin:-3px -4px;border-radius:8px;color:var(--th-text)}.th-switch-btn:hover{background:var(--th-hover)}
 .th-menu{position:absolute;top:calc(100% + 8px);left:-8px;z-index:30;min-width:300px;max-width:380px;padding:6px;background:var(--th-panel);border:1px solid var(--th-line);border-radius:14px;box-shadow:var(--th-lift);animation:th-rise .35s var(--th-spring)}
 .th-menu-it{display:grid!important;grid-template-columns:1fr auto;grid-template-rows:auto auto;column-gap:10px;width:100%;text-align:left;padding:8px 10px!important;border-radius:10px}
@@ -2188,6 +2379,7 @@ height:100%;display:flex;flex-direction:column;color:var(--th-text);font-size:13
 .th-side .th-sheetbody .th-ihead{padding-right:66px}.th-side .th-wide .th-sheetbody .th-ihead{padding-right:34px}
 /* Very narrow: the view switcher keeps its icons and drops the words. */
 @container thside (max-width:520px){.th-side .th-seglbl{display:none}.th-root.th-side .th-seg button{padding:0 11px}}
+.th-chatlink{display:flex;align-items:center;gap:9px;flex-shrink:0;padding:6px 6px 6px 12px;border-radius:14px;background:var(--th-panel);box-shadow:var(--th-shadow);font-size:12.5px;color:var(--th-t2);animation:th-fade .3s ease}.th-chatlink>svg{color:var(--th-t3);flex-shrink:0}.th-chatlink>span{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .th-side .th-sideneed{display:flex;align-items:center;gap:8px;padding:6px 8px}.th-side .th-sideneed .th-need{flex:1;min-width:0}.th-sidemore{font-size:11.5px;white-space:nowrap}
 .th-side .th-banner{border-radius:14px}
 .th-sideempty{margin:auto;max-width:300px;display:flex;flex-direction:column;align-items:center;gap:10px;text-align:center;padding:24px;font-size:12.5px;color:var(--th-t3)}
