@@ -173,6 +173,12 @@ async def action(body: dict) -> dict[str, Any]:
             result = svc.restore(path, task, str(body.get("commit") or ""))
         elif kind == "sync":
             result = svc.sync(path, task)
+        elif kind == "export":
+            result = svc.export(path)
+        elif kind == "autopilot_pause":
+            result = svc.autopilot_pause(path)
+        elif kind == "autopilot_stop":
+            result = svc.autopilot_stop(path)
         elif kind == "update":
             result = svc.update_task(path, task, title=str(body.get("title") or ""), detail=str(body.get("detail") or ""), agent=str(body.get("agent") or ""),
                                      kind=str(body.get("kind") or ""), role=str(body.get("role") or ""),

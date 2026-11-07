@@ -54,6 +54,22 @@ take re-reads your whole context, so doing the work yourself costs far more than
    that depends on several unfinished tasks starts with all of their work merged into its branch.
 7. **Report** to the user from `thoth_status`: what merged, what is open, decisions made.
 
+## Autopilot: the whole job after one approval
+
+When the user wants the job done end to end ("build it", "finish it while I'm away"), plan it, then call
+`thoth_autopilot(action="start")`. The user sees one plan card with every task and approves the plan once.
+Thoth then starts each task once what it builds on is merged, has the other agent review it, sends changes
+back, retries a failed run once, gives a task to the other agent if a plan runs out, and merges what passes.
+
+- While it runs, do not assign, review or merge its tasks yourself. Talk to the user and keep your turns short.
+- It writes to this chat (`[Thoth autopilot] ...`) only when the user must decide: an agent is stuck, a review
+  keeps asking for changes, a merge conflicts, the plan changed, or the time limit passed. Ask the user,
+  record the answer with `thoth_note`, then do what the message says (often `thoth_assign` the task again).
+- Any change you make to the plan (a new task, new instructions, another agent) pauses it. Then call
+  `thoth_autopilot(action="start")` again so the user approves the plan as it is now.
+- `pause`, `stop` and `status` need no approval. When it says it finished, tell the user the result is ready
+  (`thoth_preview` gives them a link).
+
 ## Not only code
 
 Give every task a `kind` (code, asset, doc, research, design, qa) and a `role`, and chain them with
@@ -90,6 +106,9 @@ Reviews never get a browser. You still never browse yourself.
 ## Rules
 
 - Never assign the same task twice at once; check `thoth_status` when unsure.
+- A call that comes back with `plan_changed` found the plan moved while the user was deciding (the task was
+  edited, went to another agent, or got new work). Nothing started. Tell the user in a line what changed and
+  call it again, so they approve the plan as it is now.
 - Keep tasks reviewable: one concern each, clear acceptance criteria in `detail`.
 - If a run fails, read its error in `thoth_status(task=...)` before retrying. Re-assigning
   resumes the agent's session with the error context.

@@ -46,8 +46,10 @@ harness onto the same board, such as Grok Bot, Muse, Antigravity and DeepSeek Ha
 | Agents overwrite each other | Each task gets its **own git branch and worktree**, so Claude Code and Codex can work at the same time. |
 | No versions | Every run's result is a **commit** on its task branch; merges are `--no-ff` merge commits; the timeline records which agent made which commit. |
 | One agent checks its own work | **Cross-review**: the other agent reviews the diff read-only and returns approve/changes with comments. Re-assigning a task resumes the original agent's session with the review comments in its brief. |
+| You babysit every step | **Autopilot**: approve the plan once. Thoth starts each task when what it builds on is merged, has the other agent review it, merges what passes, and writes to your chat only when something needs you. Any change to the plan pauses it until you approve the new one. |
 | Stuck with one coordinator | `thoth_coordinator` hands the coordinator role to Claude Code or Codex; they drive the same board through the Thoth MCP server. |
 | Agents can't look at the web | A task can get a **browser**: a clean Chrome without your logins, or your own Chrome when it needs your logins. See [Looking at the web](#looking-at-the-web). |
+| The result is hard to get at | **Your result**: once something is merged, the side window shows it with **Open** (in your browser), **Download** (a zip in your Downloads folder) and its folder in Finder. |
 | A plan runs out mid-project | **Plan relay**: the Team card shows how much of your Claude and ChatGPT plans is used and when each resets. When one runs out, the other agent carries on from its work (one click on **Give to Codex**, or Claude), and Hermes gives new work to the agent with room. |
 
 ## Not only code
@@ -124,7 +126,7 @@ Measured on real runs (see `thoth_status` → `tokens`, or the Team activity car
   MCP servers: one call's fixed prompt drops from 46.8k to 25.2k tokens for Claude Code and from 35.7k
   to 27.1k for Codex. Every call re-sends that prefix, so a 10–30 call run saves 200k–600k tokens.
 - **Caching does the rest:** 82–95 % of prompt tokens in our runs were cache hits.
-- **Small tool surface:** all 18 Thoth tools add about 2.3k tokens to a coordinator call (3 tools,
+- **Small tool surface:** all 19 Thoth tools add about 2.5k tokens to a coordinator call (3 tools,
   about 300 tokens, for a worker).
 - **Memory:** the brain (`.thoth/brain.db`, `BRAIN.md`) keeps goal, decisions, handoffs, reviews and
   versions across sessions and across tools, and re-assigning a task resumes the agent's own session.
@@ -159,7 +161,9 @@ Open Hermes in a git project and talk to it:
 > Claude builds the UI and Codex writes the calculation logic with tests, run
 > them in parallel, then have each review the other's work and merge what passes.
 
-Hermes will call the Thoth tools; you approve each agent launch and each merge.
+Hermes will call the Thoth tools; you approve each agent launch and each merge. An approval covers the plan as
+the card showed it: if the task, who does it, what it builds on or the work to merge changes before you answer,
+nothing starts and Hermes asks again.
 
 | Tool | What it does |
 |---|---|
@@ -174,6 +178,7 @@ Hermes will call the Thoth tools; you approve each agent launch and each merge.
 | `thoth_preview` | Open what a task built (a web page, a browser game) in your browser, served read-only on localhost |
 | `thoth_revise`, `thoth_restore`, `thoth_sync` | Send work back with feedback, bring back an earlier version, pull a dependency's newer version |
 | `thoth_cancel`, `thoth_update_task`, `thoth_coordinator` | Stop a run, edit a task, hand over coordination |
+| `thoth_autopilot` | Run the whole plan after you approve it once on a plan card (**needs your approval**); pause, stop or check it |
 
 For a brand-new project, ask for one: Hermes calls `thoth_init(create=true)` and Thoth makes the folder
 and its git repository. A task that depends on several unfinished tasks starts with all of their work
@@ -244,6 +249,20 @@ Without it Hermes learns about finished runs through `thoth_wait`, and the Thoth
 
 Slash command: `/thoth [status | task T1 | cancel R1 | coordinator claude|codex|hermes | brain | doctor]`.
 
+### Autopilot: approve the plan once
+
+Ask for the whole job ("build it, and finish it while I'm out"). Hermes plans it and shows one **plan card**:
+every task, who does it, what Thoth will do on its own, when it stops to ask, and its limits. Approve it and
+Thoth runs the plan: it starts each task once what it builds on is merged, has the other agent review it,
+sends changes back (up to 3 rounds), retries a failed run once, gives a task to the other agent when a plan
+runs out, and merges what passes review. The side window shows how far it is, with Pause and Stop.
+
+It writes to the chat that started it, and Hermes asks you, when an agent is stuck, a review keeps asking for
+changes, a merge conflicts, the plan changes, or it reaches its time limit (8 hours by default, up to 24). It leaves
+20 % of each plan for you. Any change to the plan pauses it until you approve the plan as it is now, and
+"always allow" never covers a plan card. For Hermes to hear from it while you are away, set
+`plugins.entries.thoth.allow_gateway_injection: true`.
+
 ### Let Claude Code or Codex coordinate
 
 ```
@@ -273,12 +292,14 @@ Hermes Desktop → Settings → Plugins → Thoth, or `plugins.entries.thoth.set
 default worker, Claude Code permission mode and extra allowed tools, models, CLI
 paths, run timeout (default 30 min), max parallel runs (default 3), whether agents
 get the Thoth MCP tools, session resume, worktree cleanup, chat notifications,
-environment passthrough.
+environment passthrough, plan usage, and autopilot's time limit (default 8 hours, up to 24) and the share of each
+plan it leaves you (default 20 %).
 
 ## What Thoth does on your machine (disclosure)
 
 - **Starts agent CLIs as subprocesses**: `claude -p` and `codex exec` (and `codex exec resume`), in a
-  task worktree under `<project>/.thoth/worktrees/`, only after you approve each launch in Hermes.
+  task worktree under `<project>/.thoth/worktrees/`, only after you approve each launch in Hermes, or a
+  plan card for autopilot (below).
   They run under **your** Claude Code / Codex login and plan, talk to Anthropic / OpenAI servers,
   and use your usage allowance.
 - **Permissions it gives them** (never chosen by a model):
@@ -336,6 +357,15 @@ environment passthrough.
   your logins, and is told to only look in a tab of its own. The browser tools are pre-approved inside that
   run (`codex exec` cannot ask), which the run's approval card covers; an "always allow" for runs without a
   browser never covers runs with one. Reviews never get a browser.
+- **Autopilot (only after you approve a plan card)**: Thoth starts, reviews and merges that plan's tasks
+  from Hermes's own process, without a card for each step, until the plan is done, you pause or stop it, or
+  its time limit passes. Any change to the plan pauses it until you approve a new card. While it runs it keeps
+  the Mac from idle sleep with `caffeinate -i` (ended with autopilot or with Hermes), writes to the chat that
+  started it when it needs you (only with `allow_gateway_injection`), and keeps its state in the brain and a
+  lock file (`.thoth/autopilot.lock`) so only one Hermes process drives a project.
+- **Download**: the Download button writes a zip of what is merged (the base branch's committed files, in a
+  folder named after the project, never `.env` files) to your Downloads folder. It never overwrites a file:
+  a second download is `name 2.zip`.
 - **Plan usage** (setting `plan_usage`, on by default): Thoth reads what Claude Code reports about your plan
   in each run's output (how much of the 5-hour or weekly limit is used, and when it resets), and asks
   Codex's own app server for Codex's (`codex app-server`, the `account/rateLimits/read` call, which uses no

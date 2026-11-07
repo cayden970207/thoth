@@ -99,6 +99,8 @@ class RunManager:
         on_exit: Callable[[RunState, int | None, str], None],
     ) -> ActiveRun:
         """Start the process and return at once; ``on_exit`` runs on the worker thread."""
+        if os.environ.get("THOTH_NO_AGENTS"):  # the offline tests: never start a real agent, whatever a test does
+            raise RuntimeError("agent launches are switched off here (THOTH_NO_AGENTS)")
         active = ActiveRun(run_id)
         log_path.parent.mkdir(parents=True, exist_ok=True)
         stderr_path = log_path.with_suffix(".stderr.log")

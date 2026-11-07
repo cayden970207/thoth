@@ -115,7 +115,18 @@ TOOLS: dict[str, tuple[str, dict]] = {
         "Hand the coordinator role to hermes, claude or codex; returns how to continue there.",
         _obj({"agent": {"type": "string", "enum": ["hermes", "claude", "codex"]}}, ["agent"]),
     ),
+    "thoth_autopilot": (
+        "Run the whole plan on its own after the user approves it once: Thoth starts each task when what it builds on "
+        "is merged, cross-reviews it, sends changes back, merges what passes, and writes to this chat when it needs "
+        "the user. Use it when the user wants the job done end to end. start shows the plan card (also to resume "
+        "after a pause); pause, stop and status need no approval.",
+        _obj({"action": {"type": "string", "enum": ["start", "pause", "stop", "status"]},
+              "hours": {"type": "number", "description": "Time limit in hours, up to 24 (default 8, from settings)"}}, ["action"]),
+    ),
 }
+
+# Only Hermes runs autopilot: it drives the plan from Hermes's own process and asks through Hermes's chat.
+HERMES_ONLY = ("thoth_autopilot",)
 
 # What an agent gets while it works on a run: read and write the brain, never launch other agents.
 WORKER_TOOLS = ("thoth_status", "thoth_context", "thoth_note")
@@ -139,4 +150,5 @@ EMOJI = {
     "thoth_sync": "🔄",
     "thoth_models": "🧠",
     "thoth_preview": "👀",
+    "thoth_autopilot": "🛫",
 }

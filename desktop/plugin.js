@@ -271,6 +271,7 @@ const ICONS = {
   alert: 'M12 4l9 16H3zM12 10v4M12 17h.01',
   play: 'M8 5.5v13l10.5-6.5z',
   pause: 'M9 5.5v13M15 5.5v13',
+  download: 'M12 4v10.5M7.5 10l4.5 4.5 4.5-4.5M5 19.5h14',
   arrowr: 'M5 12h14M13 6l6 6-6 6',
   back: 'M15 18l-6-6 6-6',
   up: 'M6 15l6-6 6 6',
@@ -612,13 +613,58 @@ function Relay ({ gone, cover, until }) {
 
 function NeedsWidget ({ snap, d, select }) {
   const needs = snap.needs || []
+  const shipped = (snap.tasks || []).some(t => t.status === 'merged')
   return h('div', { className: 'th-card th-widget th-needsw' },
-    h('div', { className: 'th-wlabel' }, h('span', null, 'Needs you'), needs.length ? h('b', null, needs.length) : null),
+    h('div', { className: 'th-wlabel' }, h('span', null, needs.length || !shipped ? 'Needs you' : 'Your result'), needs.length ? h('b', null, needs.length) : null),
     needs.length
       ? [h(NeedRow, { key: needs[0].id, n: needs[0], select, next: true, rich: true, d, snap }),
           ...needs.slice(1, 3).map(n => h(NeedRow, { key: n.id, n, select, d, snap })),
           needs.length > 3 ? h('div', { key: 'more', className: 'th-more' }, `+${needs.length - 3} more`) : null]
-      : h('div', { className: 'th-calm' }, h('b', null, 'Nothing needs you right now.'), h('span', null, 'Thoth asks here when a merge, a fix or a review is yours to decide.')))
+      : shipped ? h(Result, { snap, d, inCard: true })
+        : h('div', { className: 'th-calm' }, h('b', null, 'Nothing needs you right now.'), h('span', null, 'Thoth asks here when a merge, a fix or a review is yours to decide.')))
+}
+
+// Autopilot driving this project: how far the plan is, what happens now, and pause / resume / stop. Resuming goes
+// through Hermes, so the user approves the plan as it is now (a pause after a plan change needs exactly that).
+function AutopilotBar ({ snap }) {
+  const ap = snap.autopilot
+  if (!ap || !['running', 'paused', 'stopped'].includes(ap.state)) return null
+  const on = ap.state === 'running'
+  const title = on ? (ap.waiting ? 'On autopilot · waiting' : 'On autopilot') : ap.state === 'paused' ? 'Autopilot paused' : 'Autopilot stopped'
+  const parts = on
+    ? (ap.waiting ? [ap.waiting] : [`${ap.merged} of ${ap.scope} merged`, ap.doing.length ? ap.doing.join(', ') : '', ap.until ? 'until ' + clockAt(ap.until) : ''])
+    : [ap.reason + (ap.changes && ap.changes.length ? ': ' + ap.changes.join('; ') : ''), `${ap.merged} of ${ap.scope} merged`]
+  const line = parts.filter(Boolean).join(' · ')
+  const stop = () => act({ action: 'autopilot_stop' }, () => 'Autopilot stopped: what already started finishes, nothing new starts')
+  return h('div', { className: 'th-card th-auto' + (on ? ' th-auto-on' : '') },
+    h('span', { className: 'th-auto-ic', style: { '--c': 'var(--th-blue)' } }, on ? h('i', { className: 'th-pulse' }) : h(Icon, { name: 'pause', size: 13 })),
+    h('div', { className: 'th-auto-tx' }, h('b', null, title), h('span', { title: line }, line)),
+    h('div', { className: 'th-auto-act' },
+      on ? h(Btn, { sm: true, title: 'Pause: what already started finishes, nothing new starts', onClick: () => act({ action: 'autopilot_pause' }, () => 'Autopilot paused') }, 'Pause')
+        : h(Btn, { sm: true, primary: true, title: 'Ask Hermes to show you the plan as it is now, to approve', onClick: () => sendToHermes('Resume autopilot: show me the plan as it is now.') }, 'Resume'),
+      h('button', { className: 'th-linkbtn th-auto-stop', title: 'Stop autopilot: what already started finishes, nothing new starts', onClick: stop }, 'Stop')))
+}
+
+// The result, once the team has merged something: a picture of it and a click from opening it, keeping a copy
+// (a zip in Downloads) or finding its folder. It sits where "needs you" does, whenever nothing needs you.
+function Result ({ snap, d, inCard = false }) {
+  const tasks = snap.tasks || [], merged = tasks.filter(t => t.status === 'merged')
+  const pic = [...merged].sort((a, b) => b.id - a.id).map(t => ({ ref: t.ref, path: ((d.byTask[t.id] || {}).produced || []).find(f => PHOTO.test(f)) })).find(x => x.path)
+  const src = useThumb(pic ? pic.ref : '', pic ? pic.path : '')
+  if (!merged.length) return null
+  const left = tasks.filter(t => !['merged', 'cancelled'].includes(t.status)).length
+  const canOpen = !!(snap.meta.run || '').trim() || merged.some(t => hasPage(d.byTask[t.id] || { changed: [], outputs: [] }))
+  const last = Math.max(...merged.map(t => t.updated_at || 0))
+  const title = left ? `${merged.length} of ${tasks.length} shipped` : `${projectName(snap.project)} is ready`
+  const sub = left ? `${plural(left, 'task')} still on the way` : `${plural(merged.length, 'task')} shipped` + (last ? ' · ' + ago(last) : '')
+  const download = () => act({ action: 'export' }, r => `Saved ${r.name} (${plural(r.files, 'file')}) to ${r.folder.split('/').pop()}`).then(r => { if (r && r.path) showFiles(r.path) })
+  return h('div', { className: 'th-result' + (inCard ? ' th-result-in' : ' th-card') },
+    src ? h('span', { className: 'th-rpic' }, h('img', { src, alt: '' })) : h('span', { className: 'th-rpic th-rpic-icon' }, h(Icon, { name: 'flag', size: 16 })),
+    h('div', { className: 'th-result-tx' }, h('b', null, title), h('span', { title: sub }, sub)),
+    h('div', { className: 'th-result-act' },
+      canOpen ? h(Btn, { sm: true, primary: true, title: 'Open everything merged so far in your browser', onClick: () => openPreview('') }, 'Open') : null,
+      h(Btn, { sm: true, primary: !canOpen, title: 'Save a zip of everything merged to your Downloads folder (never .env files)', onClick: download }, h(Icon, { name: 'download', size: 13 }), 'Download'),
+      h('button', { className: 'th-iconbtn', title: 'Show the project folder in Finder', 'aria-label': 'Show the project folder in Finder', onClick: () => showFiles(snap.project) }, h(Icon, { name: 'folder', size: 15 }))))
 }
 // The first thing that needs you shows the work itself when it made a picture.
 function NeedThumb ({ n, d, snap }) {
@@ -901,7 +947,8 @@ function Canvas ({ snap, d, selected, select, project, inset = 0, onBackground =
         h('div', { key: 'm', className: 'th-main-meta' }, h('span', { className: 'th-node-meta' }, all.filter(t => t.status === 'merged').length + ' merged'),
           all.some(t => t.status === 'merged' && ((snap.meta.run || '').trim() || hasPage(d.byTask[t.id]))) ? h('button', { className: 'th-tag th-tagbtn', title: 'Open everything merged so far in your browser', onClick: e => { e.stopPropagation(); openPreview('') } }, h(Icon, { name: 'play', size: 10 }), ' Open') : null),
         h('div', { key: 'f', className: 'th-node-ft' },
-          (() => { const ready = tasks.filter(t => t.status === 'approved').length; return h(StatusPill, { status: ready ? 'approved' : 'todo', label: ready ? ready + ' ready to merge' : 'Waiting' }) })(),
+          (() => { const ready = tasks.filter(t => t.status === 'approved').length, left = all.filter(t => !['merged', 'cancelled'].includes(t.status)).length
+            return h(StatusPill, { status: ready ? 'approved' : left ? 'todo' : 'merged', label: ready ? ready + ' ready to merge' : left ? 'Waiting' : 'All shipped' }) })(),
           // Say what Main waits on: your OK only when something is ready, otherwise the tasks still on their way.
           (() => {
             const ready = all.some(t => t.status === 'approved')
@@ -1598,8 +1645,10 @@ function ThothSide () {
     h('div', { className: 'th-sidebody' },
       h(SideAsk, { snap, chat }),
       h(ChatLink, { snap, chat }),
+      h(AutopilotBar, { snap }),
       needs.length ? h('div', { className: 'th-card th-sideneed' }, h(NeedRow, { n: needs[0], select, next: true, inline: true }),
-        needs.length > 1 ? h('button', { className: 'th-linkbtn th-sidemore', title: 'See everything that needs you in Team & brain', onClick: showTeam }, '+' + (needs.length - 1) + ' more') : null) : null,
+        needs.length > 1 ? h('button', { className: 'th-linkbtn th-sidemore', title: 'See everything that needs you in Team & brain', onClick: showTeam }, '+' + (needs.length - 1) + ' more') : null)
+        : snap.autopilot && ['running', 'paused'].includes(snap.autopilot.state) ? null : h(Result, { snap, d }),
       h('section', { className: 'th-sidews' + (open ? ' th-open' : '') + (wide ? ' th-wide' : '') + (full ? ' th-full' : '') },
         h('div', { className: 'th-surface' },
           view === 'canvas' ? h(Canvas, { snap, d, selected: open ? sel : '', select, project: s.project, inset: peek ? sheetH + 10 : 0, onBackground: open ? close : null })
@@ -2493,6 +2542,27 @@ height:100%;display:flex;flex-direction:column;color:var(--th-text);font-size:13
 @container thside (max-width:520px){.th-side .th-seglbl{display:none}.th-root.th-side .th-seg button{padding:0 11px}}
 .th-chatlink{display:flex;align-items:center;gap:9px;flex-shrink:0;padding:6px 6px 6px 12px;border-radius:14px;background:var(--th-panel);box-shadow:var(--th-shadow);font-size:12.5px;color:var(--th-t2);animation:th-fade .3s ease}.th-chatlink>svg{color:var(--th-t3);flex-shrink:0}.th-chatlink>span{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .th-side .th-sideneed{display:flex;align-items:center;gap:8px;padding:6px 8px}.th-side .th-sideneed .th-need{flex:1;min-width:0}.th-sidemore{font-size:11.5px;white-space:nowrap}
+/* The result: a picture of it, what it is, and open / download / its folder. */
+.th-result{display:flex;flex-wrap:wrap;align-items:center;gap:10px 12px;padding:8px 10px 8px 8px;min-width:0}
+.th-result-in{margin-top:2px;padding:10px;border-radius:16px;background:var(--th-sunken)}
+.th-rpic{width:44px;height:44px;flex-shrink:0;display:grid;place-items:center;border-radius:12px;overflow:hidden;background:var(--th-sunken);color:var(--th-t3)}
+.th-result-in .th-rpic{background:var(--th-panel)}
+.th-rpic img{width:100%;height:100%;object-fit:cover}
+.th-result-tx{flex:1 1 140px;display:flex;flex-direction:column;gap:2px;min-width:0}
+.th-result-tx b{font-size:13.5px;font-weight:650;color:var(--th-text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.th-result-tx span{font-size:12px;color:var(--th-t3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.th-result-act{display:flex;align-items:center;gap:6px;flex-shrink:0;margin-left:auto}
+/* Autopilot: the plan running on its own (blue), or waiting on you (amber). */
+.th-auto{display:flex;align-items:center;gap:12px;padding:8px 12px 8px 10px;min-width:0}
+.th-auto-ic{width:30px;height:30px;flex-shrink:0;display:grid;place-items:center;border-radius:50%;background:var(--th-blue-bg);color:var(--th-blue-tx)}
+.th-auto:not(.th-auto-on) .th-auto-ic{background:var(--th-amber-bg);color:var(--th-amber-tx)}
+.th-auto-tx{flex:1;display:flex;flex-direction:column;gap:1px;min-width:0}
+.th-auto-tx b{font-size:13px;font-weight:650;color:var(--th-text)}
+.th-auto-tx span{font-size:12px;color:var(--th-t3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.th-auto-act{display:flex;align-items:center;gap:10px;flex-shrink:0}
+.th-auto-stop{font-size:12px}
+.th-iconbtn{display:inline-grid;place-items:center;width:30px;height:30px;border-radius:999px;color:var(--th-t2);transition:background .2s,color .2s}
+.th-iconbtn:hover{background:var(--th-hover);color:var(--th-text)}
 .th-side .th-banner{border-radius:14px}
 .th-sideempty{margin:auto;max-width:300px;display:flex;flex-direction:column;align-items:center;gap:10px;text-align:center;padding:24px;font-size:12.5px;color:var(--th-t3)}
 .th-sideempty b{font-size:14px;color:var(--th-text)}

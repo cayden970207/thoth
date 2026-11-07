@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from . import browser as web
-from . import gitops, plans, preview
+from . import autopilot, gitops, plans, preview
 from .agents import McpSpec, RunState, clean_env, driver_for
 from .brain import NOTE_KINDS, TASK_KINDS, OPEN_RUN_STATUSES, Brain, BrainError, find_brain_root, parse_id, rid, tid
 from .briefing import ago, board_lines, build_brief, parse_report, review_brief, strip_report
@@ -57,6 +57,8 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "dependency_dirs": list(gitops.DEFAULT_DEPENDENCY_DIRS),
     "setup_timeout_seconds": 600,
     "plan_usage": True,
+    "autopilot_hours": 8,
+    "autopilot_reserve_percent": 20,
 }
 
 Notifier = Callable[[str, dict[str, Any]], None]
@@ -969,6 +971,89 @@ class Thoth:
             "board": board_lines(brain),
         }
 
+    # -- autopilot: the user approves a plan once and Thoth runs it (see autopilot.py) ---------------------
+
+    def _autopilot_hours(self, hours: Any = None) -> float:
+        try:
+            value = float(hours) if hours not in (None, "") else float(self.settings.get("autopilot_hours") or 8)
+        except (TypeError, ValueError):
+            value = 8.0
+        return max(0.5, min(24.0, value))
+
+    def _autopilot_reserve(self) -> float:
+        try:
+            return max(0.0, min(0.9, float(self.settings.get("autopilot_reserve_percent") or 0) / 100))
+        except (TypeError, ValueError):
+            return 0.2
+
+    def autopilot_card(self, project_dir: str, hours: Any = None) -> dict:
+        """What a plan card shows and covers: the plan, the tasks still to run, and the limits."""
+        brain = self.open(project_dir)
+        plan = autopilot.snapshot(brain)
+        tasks = {t["ref"]: t for t in brain.tasks()}
+        return {"plan": plan, "scope": [ref for ref in plan["tasks"] if tasks[ref]["status"] != "merged"], "tasks": tasks,
+                "hours": self._autopilot_hours(hours), "reserve": self._autopilot_reserve(), "root": str(brain.root),
+                "base": brain.meta().get("base_branch") or "main"}
+
+    def autopilot_start(self, project_dir: str, hours: Any = None, session: str = "") -> dict:
+        brain = self.open(project_dir)
+        ap = autopilot.start(brain, hours=self._autopilot_hours(hours), reserve=self._autopilot_reserve(), session=session)
+        brain.event(self.actor, "autopilot", f"autopilot runs {', '.join(ap['scope'])} for up to {ap['hours']:g} hours")
+        return {"autopilot": "running", "tasks": ap["scope"], "until": time.strftime("%H:%M", time.localtime(ap["until"])),
+                "next": "Thoth runs the plan from here and writes to this chat when it needs the user. Tell the user in a "
+                        "line that it has started and that they can pause it from the Thoth side window."}
+
+    def autopilot_pause(self, project_dir: str, reason: str = "paused by the user") -> dict:
+        brain = self.open(project_dir)
+        ap = autopilot.pause(brain, reason)
+        if ap:
+            brain.event(self.actor, "autopilot", f"autopilot paused: {reason}")
+        return {"autopilot": ap.get("state") or "off"}
+
+    def autopilot_stop(self, project_dir: str) -> dict:
+        brain = self.open(project_dir)
+        ap = autopilot.stop(brain)
+        if ap:
+            brain.event(self.actor, "autopilot", "autopilot stopped")
+        return {"autopilot": "off", "note": "Runs already started finish on their own; nothing new starts."}
+
+    def autopilot_status(self, project_dir: str) -> dict:
+        brain = self.open(project_dir)
+        return {"autopilot": autopilot.view(brain) or {"state": "off"}}
+
+    def autopilot_step(self, project_dir: str) -> list[str]:
+        """One step of a running autopilot. A lock file keeps two Hermes processes from driving one project."""
+        import fcntl
+
+        brain = self.open(project_dir)
+        with open(brain.dir / "autopilot.lock", "w") as lock:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                return []
+            return autopilot.step(self, brain)
+
+    def export(self, project_dir: str, to: str | os.PathLike | None = None) -> dict:
+        """A zip of what is merged (the base branch), for the person to keep or send: committed files only, in a
+        folder named after the project, never .env files. Saved in Downloads unless `to` names a folder."""
+        import zipfile
+
+        brain = self.open(project_dir)
+        base = brain.meta().get("base_branch") or "HEAD"
+        folder = Path(to).expanduser() if to else Path.home() / "Downloads"
+        if not folder.is_dir():
+            raise BrainError(f"{folder} isn't a folder")
+        name = re.sub(r"[^\w .-]+", "-", brain.root.name).strip(" .-") or "project"
+        target, n = folder / f"{name}.zip", 2
+        while target.exists():  # never overwrite: "cat-fish 2.zip", like Finder
+            target, n = folder / f"{name} {n}.zip", n + 1
+        gitops.git(brain.root, "archive", "--format=zip", f"--prefix={name}/", "-o", str(target), base,
+                   "--", ".", ":(exclude,glob)**/.env", ":(exclude,glob)**/.env.*")
+        with zipfile.ZipFile(target) as z:
+            files = sum(1 for i in z.infolist() if not i.is_dir())
+        brain.event(self.actor, "exported", f"saved {target.name} ({files} files from {base}) in {folder}")
+        return {"path": str(target), "name": target.name, "folder": str(folder), "files": files, "bytes": target.stat().st_size, "branch": base}
+
     # -- notes & context ---------------------------------------------------------
 
     def note(self, project_dir: str, kind: str, body: str, task: Any = None, run: Any = None, author: str = "") -> dict:
@@ -1031,6 +1116,7 @@ class Thoth:
             "recent": [f"{ago(e['ts'])} {e['actor']}: {e['message']}" for e in brain.events(limit=10)],
             "tokens": (lambda us: f"{us['total']['prompt']:,} prompt tokens across agents ({round(us['cache_rate'] * 100)}% cache hits); about {us['kept_out_tokens']:,} tokens of agent transcripts stayed out of the coordinator's context")(self.usage(brain)),
             **({"plans": line} if (line := plans.hint(self.plan_usage(refresh=False))) else {}),
+            **({"autopilot": pilot} if (pilot := autopilot.hint(brain)) else {}),
             "brain_file": str(brain.dir / "BRAIN.md"),
         }
 
@@ -1100,6 +1186,12 @@ class Thoth:
                     detail += f" · {_name(t['agent'] or 'claude')} couldn't check {len(limits)} thing{'s' if len(limits) != 1 else ''}"
                 out.append({"id": f"review-{t['ref']}", "kind": "review", "task": t["ref"], "who": t["agent"], "priority": 3,
                             "title": f"{t['ref']} is built and waiting for review", "detail": detail, "tool": "thoth_review"})
+        # While autopilot runs, it reviews, merges, retries and hands over its tasks itself: only what it is
+        # waiting for the user on (and what it doesn't do, like bringing in a newer dependency) still needs them.
+        ap = autopilot.load(brain)
+        if ap.get("state") == "running":
+            scope, held = set(ap.get("scope") or []), set(ap.get("held") or {})
+            out = [n for n in out if n["task"] not in scope or n["task"] in held or n["kind"] == "sync"]
         out.sort(key=lambda n: n["priority"])
         return out
 
@@ -1231,6 +1323,7 @@ class Thoth:
             "workers": self.workers(),
             "usage": self.usage(brain),
             **({"plans": self.plan_usage()} if self.settings.get("plan_usage", True) else {}),
+            "autopilot": autopilot.view(brain),
             "now": time.time(),
         }
 

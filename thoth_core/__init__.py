@@ -5,7 +5,7 @@ same code runs inside Hermes (the plugin) and inside the stdio MCP server that
 Claude Code and Codex connect to.
 """
 
-__version__ = "0.7.1"
+__version__ = "0.8.0"
 
 AGENTS = ("claude", "codex", "hermes")
 WORKER_AGENTS = ("claude", "codex")

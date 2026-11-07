@@ -24,12 +24,13 @@ from pathlib import Path
 from typing import Any
 
 from .thoth_core import __version__
+from .thoth_core import autopilot
 from .thoth_core import browser as web
 from .thoth_core import chats
 from .thoth_core import plans
 from .thoth_core import projects as registry
 from .thoth_core.agents import driver_for
-from .thoth_core.brain import Brain, BrainError, find_brain_root, parse_id
+from .thoth_core.brain import Brain, BrainError, find_brain_root, parse_id, tid
 from .thoth_core.briefing import board_lines
 from .thoth_core.dispatch import call, coordinator_howto, mcp_server_path
 from .thoth_core.schemas import EMOJI, TOOLS
@@ -42,6 +43,7 @@ TOOLSET = "thoth"
 _PAGE_TAG = re.compile(r"\n\s*— via Thoth · ([^\n]+?)\s*$")
 GATED = ("thoth_assign", "thoth_revise", "thoth_review", "thoth_merge")
 TICKET_TTL = 15 * 60
+CONDUCTOR_TICK = 5  # seconds between autopilot steps
 
 _AGENT_LABEL = {"claude": "Claude Code", "codex": "Codex"}
 _PERMISSION_NOTE = {
@@ -61,6 +63,7 @@ class ThothPlugin:
         self._waiting: dict[tuple[str, str], int] = {}        # runs an in-flight thoth_wait will report itself
         self._held: dict[tuple[str, str], list[list[str]]] = {}  # (root, session) -> notices held for one batch
         self._session_projects: dict[str, str] = {}           # session -> project it last used Thoth on
+        self._conductor: threading.Thread | None = None       # drives running autopilots (see _drive)
         self._lock = threading.Lock()
 
     # -- settings & project -----------------------------------------------------
@@ -211,6 +214,8 @@ class ThothPlugin:
             lines.append("These run as you, outside the agents' sandbox and with network access.")
             lines.append(f"Details: project {where}.")
             return "\n".join(lines), f"thoth:setup:{_short_hash(where + setup + '|' + run)}"
+        if name == "thoth_autopilot":
+            return self._plan_card(svc, project, args)
         brain = svc.open(project)
         task = brain.task(parse_id(args.get("task"), "T"))
         what = f"{task['ref']} “{task['title']}”"
@@ -272,6 +277,31 @@ class ThothPlugin:
         key = f"thoth:{kind}:{agent}{':web-' + browse if browse else ''}:{_short_hash(str(brain.root))}"
         return "\n".join(lines), key
 
+    @staticmethod
+    def _plan_card(svc: Thoth, project: str, args: dict) -> tuple[str, str]:
+        """The plan card: every task autopilot will run, what Thoth does on its own, when it stops, and its limits.
+        Its rule key is the plan's own fingerprint, so an "always allow" can never cover a plan nobody has seen."""
+        card = svc.autopilot_card(project, args.get("hours"))
+        if not card["scope"]:
+            raise BrainError("Everything on the plan is already merged: there is nothing for autopilot to run.")
+        hours, rounds = card["hours"], int(svc.settings.get("max_review_rounds") or 3)
+        lines = [f"Run this plan on its own until it is done (up to {hours:g} hours):"]
+        for ref in card["scope"]:
+            t = card["tasks"][ref]
+            who = _AGENT_LABEL.get(t["agent"]) or ("you, through Hermes" if t["agent"] == "hermes" else "the default agent")
+            after = f" · after {', '.join(tid(d) for d in t['depends_on'])}" if t["depends_on"] else ""
+            web_use = {"clean": " · with a clean Chrome", "user": " · uses your Chrome, so it waits for you"}.get(t.get("browser") or "", "")
+            lines.append(f"• {ref} {who} · {t['title']}{after}{web_use}")
+        lines.append(f"Thoth starts each task once what it builds on is merged, has the other agent review it, sends changes back "
+                     f"(up to {rounds} rounds), retries a failed run once, gives a task to the other agent if a plan runs out, and "
+                     f"merges what passes review into {card['base']}.")
+        lines.append(f"It stops and asks you in this chat when an agent is stuck, a review keeps asking for changes, a merge "
+                     f"conflicts, the plan changes, or after {hours:g} hours. It keeps {round(card['reserve'] * 100)}% of each "
+                     f"plan for you, and keeps your Mac awake while it runs.")
+        lines.append(f"Details: up to {int(svc.settings.get('max_concurrent_runs') or 3)} agents at once · your Claude and ChatGPT "
+                     f"plans · Claude Code in its OS sandbox, Codex in workspace-write · project {card['root']}.")
+        return "\n".join(lines), f"thoth:autopilot:{_short_hash(autopilot.fingerprint(card['plan']))}"
+
     def _self_assign(self, name: str, args: dict, svc: Thoth, project: str) -> bool:
         """thoth_assign to hermes starts no process: the coordinator does the work in its own turn."""
         if name not in ("thoth_assign", "thoth_revise"):
@@ -286,7 +316,8 @@ class ThothPlugin:
 
     @staticmethod
     def _gated(name: str, args: dict) -> bool:
-        return name in GATED or (name == "thoth_init" and bool(str(args.get("setup") or args.get("run") or "").strip()))
+        return (name in GATED or (name == "thoth_init" and bool(str(args.get("setup") or args.get("run") or "").strip()))
+                or (name == "thoth_autopilot" and str(args.get("action") or "").lower() == "start"))
 
     def pre_tool_call(self, tool_name: str = "", args: dict | None = None, task_id: str = "", session_id: str = "", **_: Any) -> dict | None:
         args = dict(args or {})
@@ -303,12 +334,38 @@ class ThothPlugin:
         except Exception as exc:
             logger.warning("thoth: pre_tool_call check failed: %s", exc)
             return {"action": "block", "message": f"Thoth could not check this call: {exc}"}
+        state = self._plan_state(svc, project, tool_name, args)  # what this approval covers (see _plan_changes)
         with self._lock:
             now = time.time()
             self._tickets = {k: v for k, v in self._tickets.items() if now - v[0] < TICKET_TTL}
-            self._tickets[(session_id or task_id, _fingerprint(tool_name, args))] = (now, key)
+            self._tickets[(session_id or task_id, _fingerprint(tool_name, args))] = (now, key, state)
         self._mark_waiting(project, text.split("\n", 1)[0], session_id or task_id)
         return {"action": "approve", "message": text, "rule_key": key}
+
+    @staticmethod
+    def _plan_state(svc: Thoth, project: str, name: str, args: dict) -> dict:
+        """The part of the shared plan an approval covers: the project goal, the task as the card showed it (what it
+        says, who does it, what it builds on and how far each of those got) and, for a review or a merge, the exact
+        work. An approval holds only while this stays the same."""
+        if name == "thoth_init":
+            return {}
+        if name == "thoth_autopilot":
+            try:
+                return {"autopilot": autopilot.snapshot(svc.open(project))}
+            except Exception:
+                return {}
+        try:
+            brain = svc.open(project)
+            task = brain.task(parse_id(args.get("task"), "T"))
+            deps = {}
+            for dep in (brain.task(d) for d in task.get("depends_on") or []):
+                deps[dep["ref"]] = dep.get("head_commit") or ""
+        except Exception:
+            return {}
+        state = {"ref": task["ref"], "goal": brain.meta().get("goal", ""), "deps": deps, **{k: task.get(k) for k in _PLAN_FIELDS}}
+        if name in ("thoth_review", "thoth_merge"):
+            state.update(work=task.get("head_commit") or "", status=task.get("status") or "")
+        return state
 
     def post_tool_call(self, tool_name: str = "", args: dict | None = None, status: str = "", **_: Any) -> None:
         """A gated call the user rejected (or that was blocked) is no longer waiting for an OK."""
@@ -327,10 +384,11 @@ class ThothPlugin:
         except Exception:
             logger.debug("thoth: could not record the pending approval", exc_info=True)
 
-    def _consume_ticket(self, name: str, args: dict, scope: str) -> bool:
+    def _take_ticket(self, name: str, args: dict, scope: str) -> tuple | None:
+        """The approval this call passed through, if it is still fresh."""
         with self._lock:
             entry = self._tickets.pop((scope, _fingerprint(name, args)), None)
-        return entry is not None and time.time() - entry[0] < TICKET_TTL
+        return entry if entry is not None and time.time() - entry[0] < TICKET_TTL else None
 
     @staticmethod
     def _gate(name: str) -> str:
@@ -351,11 +409,24 @@ class ThothPlugin:
             project = self.project_for(args, scope)
             try:
                 if self._gated(name, args) and not self._self_assign(name, args, svc, project):
-                    if not self._consume_ticket(name, args, scope):
+                    ticket = self._take_ticket(name, args, scope)
+                    if ticket is None:
                         return json.dumps({"ok": False, "error": self._gate(name)})
-                    self._mark_waiting(project, "", "")  # approved: nothing is waiting any more
+                    self._mark_waiting(project, "", "")  # answered: nothing is waiting any more
+                    changed = _plan_changes(ticket[2], self._plan_state(svc, project, name, args))
+                    if changed:
+                        # The user said yes to a plan that has since moved: start nothing, and ask again.
+                        return json.dumps({"ok": False, "plan_changed": changed, "error": (
+                            "BLOCKED: the plan changed while this waited for the user's OK (" + "; ".join(changed) + "). "
+                            "Nothing was started. Call it again so the user approves the plan as it is now.")})
                 if name == "thoth_wait":
                     result = self._wait(svc, args, project)
+                elif name == "thoth_autopilot":
+                    if str(args.get("action") or "").lower() == "start":
+                        args["session"] = _session_key()  # where autopilot writes when it needs the user
+                    result = call(svc, name, args, lambda: project)
+                    if result.get("autopilot") == "running":
+                        self._ensure_conductor()
                 else:
                     result = call(svc, name, args, lambda: project)
                 self.remember(project)
@@ -460,6 +531,55 @@ class ThothPlugin:
         except Exception:
             logger.debug("thoth: inject_message failed", exc_info=True)
 
+    # -- autopilot ---------------------------------------------------------------
+
+    def _ensure_conductor(self) -> None:
+        """Start the thread that drives running autopilots, unless one is already running."""
+        if os.environ.get("THOTH_NO_CONDUCTOR"):  # tests drive autopilot step by step
+            return
+        with self._lock:
+            if self._conductor is not None and self._conductor.is_alive():
+                return
+            self._conductor = threading.Thread(target=self._drive, name="thoth-autopilot", daemon=True)
+            self._conductor.start()
+
+    def _drive(self) -> None:
+        """Every few seconds, move each running autopilot forward. Ends when none is running; keeps the Mac awake meanwhile."""
+        awake = None
+        try:
+            while True:
+                live = []
+                for project in self._known_projects():
+                    try:
+                        root = find_brain_root(project)
+                        if root is not None and autopilot.load(Brain(root)).get("state") == "running":
+                            live.append(str(root))
+                    except Exception:
+                        continue
+                if not live:
+                    return
+                if awake is None or awake.poll() is not None:
+                    awake = _keep_awake()
+                svc = self.service()
+                for root in live:
+                    try:
+                        for text in svc.autopilot_step(root):
+                            self._tell(root, text)
+                    except Exception:
+                        logger.warning("thoth: autopilot step failed for %s", root, exc_info=True)
+                time.sleep(CONDUCTOR_TICK)
+        finally:
+            if awake is not None and awake.poll() is None:
+                awake.terminate()
+
+    def _tell(self, root: str, text: str) -> None:
+        """Write to the chat that started autopilot, so Hermes takes a turn (needs allow_gateway_injection)."""
+        try:
+            session = autopilot.load(Brain(root)).get("session") or ""
+            self.ctx.inject_message(f"[Thoth autopilot · {Path(root).name}] {text}", role="user", session_key=session or None)
+        except Exception:
+            logger.debug("thoth: autopilot message failed", exc_info=True)
+
     # -- ambient context ---------------------------------------------------------
 
     def pre_llm_call(self, session_id: str = "", is_first_turn: bool = False, user_message: Any = "", **_: Any) -> dict | None:
@@ -513,6 +633,12 @@ class ThothPlugin:
             plan_line = ""
         if plan_line:
             lines.append(plan_line)
+        try:
+            pilot = autopilot.hint(brain)
+        except Exception:
+            pilot = ""
+        if pilot:
+            lines.append(pilot)
         if running:
             lines.append("Running: " + "; ".join(f"{r['ref']} {r['agent']} {r['kind']} {r['task_ref']}: {r['progress'][:80]}" for r in running))
         try:
@@ -588,8 +714,66 @@ def doctor_text(settings: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+_PLAN_FIELDS = ("title", "detail", "agent", "kind", "role", "browser", "model", "effort", "depends_on")
+_CHANGE_WORDS = {
+    "goal": "the project goal changed",
+    "title": "{ref} was renamed",
+    "detail": "{ref}'s instructions changed",
+    "agent": "{ref} went to another agent",
+    "kind": "{ref}'s kind changed",
+    "role": "{ref}'s role changed",
+    "browser": "{ref}'s web access changed",
+    "model": "{ref}'s model changed",
+    "effort": "{ref}'s effort changed",
+    "depends_on": "what {ref} builds on changed",
+    "work": "{ref} has new work since the user was asked",
+    "status": "{ref}'s review status changed",
+}
+
+
+def _plan_changes(before: dict, now: dict) -> list[str]:
+    """What moved in the plan between the approval card and the call, in plain words; empty when nothing did."""
+    if not before:
+        return []
+    if "autopilot" in before:  # a plan card covers the whole plan
+        return autopilot.changes(before["autopilot"], (now or {}).get("autopilot") or {"goal": before["autopilot"].get("goal"), "tasks": {}})
+    ref = before.get("ref") or "the task"
+    if not now:
+        return [f"{ref} is no longer on the plan"]
+    out = [words.format(ref=ref) for key, words in _CHANGE_WORDS.items() if key in before and before.get(key) != now.get(key)]
+    if before.get("depends_on") == now.get("depends_on"):
+        out += [f"{dep}, which {ref} builds on, has new work" for dep, commit in (before.get("deps") or {}).items()
+                if (now.get("deps") or {}).get(dep, commit) != commit]
+    return out
+
+
+def _session_key() -> str:
+    """The chat the current tool call came from, for messages back to it."""
+    try:
+        from gateway.session_context import get_session_env
+
+        return get_session_env("HERMES_SESSION_KEY") or ""
+    except Exception:
+        return ""
+
+
+def _keep_awake() -> Any:
+    """Keep the Mac from idle sleep while autopilot runs (`caffeinate -i`, ended with autopilot or with Hermes)."""
+    import shutil
+    import subprocess
+    import sys
+
+    exe = shutil.which("caffeinate") if sys.platform == "darwin" else None
+    if not exe:
+        return None
+    try:
+        return subprocess.Popen([exe, "-i", "-w", str(os.getpid())], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except OSError:
+        return None
+
+
 def _fingerprint(name: str, args: dict) -> str:
-    relevant = {k: args.get(k) for k in ("project", "task", "agent", "reviewer", "instructions", "override", "feedback", "files", "model", "effort")}
+    relevant = {k: args.get(k) for k in ("project", "task", "agent", "reviewer", "instructions", "override", "feedback", "files", "model", "effort", "action", "hours")}
     blob = json.dumps([name, relevant], sort_keys=True, default=str)
     return hashlib.sha256(blob.encode()).hexdigest()
 
@@ -675,6 +859,12 @@ def register(ctx: Any) -> None:
         for child in sorted(skills_dir.iterdir()):
             if (child / "SKILL.md").is_file():
                 ctx.register_skill(child.name, child / "SKILL.md")
+
+    # Autopilots that were running when Hermes last stopped carry on once it is up.
+    if not os.environ.get("THOTH_NO_CONDUCTOR"):
+        resume = threading.Timer(15, plugin._ensure_conductor)
+        resume.daemon = True
+        resume.start()
 
     import atexit
 

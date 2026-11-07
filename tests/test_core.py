@@ -26,6 +26,8 @@ def _git(cwd, *args):
 def _own_data_dir(tmp_path_factory, monkeypatch):
     """Tests never touch the user's real Thoth data (chats.json and friends)."""
     monkeypatch.setenv("THOTH_DATA_DIR", str(tmp_path_factory.mktemp("thoth-data")))
+    monkeypatch.setenv("THOTH_NO_CONDUCTOR", "1")  # tests drive autopilot step by step
+    monkeypatch.setenv("THOTH_NO_AGENTS", "1")  # and never start a real Claude Code or Codex run
 
 
 @pytest.fixture()
@@ -139,7 +141,7 @@ def test_gated_tools_need_the_hook(repo):
     plugin = _load_plugin()
     ctx = FakeCtx()
     plugin.register(ctx)
-    assert len(ctx.tools) == 18 and "coordinate" in ctx.skills
+    assert len(ctx.tools) == 19 and "coordinate" in ctx.skills
     init = json.loads(ctx.tools["thoth_init"]({"project": str(repo), "goal": "g"}, session_id="s1"))
     assert init["ok"]
     json.loads(ctx.tools["thoth_plan"]({"project": str(repo), "tasks": [{"title": "T", "agent": "codex"}]}, session_id="s1"))
@@ -964,3 +966,239 @@ def test_codex_limits_come_from_its_app_server(tmp_path):
     from thoth_core import plans
     assert plans.load(svc.data_dir)["codex"]["source"] == "codex"
     assert plans.read_codex(str(tmp_path / "missing")) is None
+
+
+def test_download_zips_what_is_merged_and_never_env_files(repo):
+    import zipfile
+    svc = Thoth(mcp_launcher=None)
+    svc.init(str(repo))
+    (repo / ".env").write_text("SECRET=1\n")
+    (repo / "site").mkdir()
+    (repo / "site" / "index.html").write_text("<h1>hi</h1>\n")
+    (repo / "site" / ".env.local").write_text("X=1\n")
+    _git(repo, "add", "-A")
+    _git(repo, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "site")
+    out = repo.parent / (repo.name + "-downloads")
+    out.mkdir()
+    first = svc.export(str(repo), to=out)
+    names = sorted(i.filename for i in zipfile.ZipFile(first["path"]).infolist() if not i.is_dir())
+    assert names == [f"{repo.name}/app.py", f"{repo.name}/site/index.html"]  # committed files, in the project's folder
+    assert first["files"] == 2 and first["name"] == f"{repo.name}.zip" and first["branch"] == "main"
+    assert svc.export(str(repo), to=out)["name"] == f"{repo.name} 2.zip"  # never overwrites a copy you kept
+    with pytest.raises(BrainError):
+        svc.export(str(repo), to=out / "missing")
+
+
+def test_an_approval_holds_only_for_the_plan_it_showed(repo):
+    # "Invalidate pending approvals whenever the shared plan changes" (@escship): a yes covers the plan as the
+    # card showed it. If the task changes while the card waits, nothing starts and Hermes asks again.
+    plugin = _load_plugin()
+    ctx = FakeCtx()
+    plugin.register(ctx)
+    p = str(repo)
+    ctx.tools["thoth_init"]({"project": p, "goal": "A landing page"}, session_id="s1")
+    ctx.tools["thoth_plan"]({"project": p, "tasks": [{"title": "Build the page", "agent": "codex", "detail": "Hero and signup"}]}, session_id="s1")
+    merge = {"project": p, "task": "T1"}
+    assert ctx.hooks["pre_tool_call"](tool_name="thoth_merge", args=merge, session_id="s1")["action"] == "approve"
+    Thoth(mcp_launcher=None).update_task(p, "T1", detail="Hero, pricing table and signup")  # edited while the card waits
+    out = json.loads(ctx.tools["thoth_merge"](merge, session_id="s1"))
+    assert not out["ok"] and out["plan_changed"] == ["T1's instructions changed"] and "Nothing was started" in out["error"]
+    assert not Brain.open(repo).meta().get("pending_approval")  # the page no longer says Hermes waits for an OK
+    # Asked again, the same call goes through the gate (and on to merge, which says T1 isn't built yet).
+    ctx.hooks["pre_tool_call"](tool_name="thoth_merge", args=merge, session_id="s1")
+    again = json.loads(ctx.tools["thoth_merge"](merge, session_id="s1"))
+    assert not again["ok"] and "plan_changed" not in again and "BLOCKED" not in again["error"]
+    # A changed goal counts too.
+    ctx.hooks["pre_tool_call"](tool_name="thoth_merge", args=merge, session_id="s1")
+    Brain.open(repo).set_meta("goal", "A landing page in French")
+    assert json.loads(ctx.tools["thoth_merge"](merge, session_id="s1"))["plan_changed"] == ["the project goal changed"]
+
+
+def _fake_hands(svc, brain, monkeypatch):
+    """Stand-ins for starting, reviewing and merging: they only move the task, and remember what was asked."""
+    calls = []
+
+    def assign(project, ref, agent="", **_):
+        calls.append(("assign", ref, agent))
+        brain.update_task(int(ref[1:]), status="running", agent=agent)
+        return {}
+
+    def review(project, ref, reviewer="", **_):
+        calls.append(("review", ref, reviewer))
+        brain.update_task(int(ref[1:]), status="reviewing")
+        return {}
+
+    def merge(project, ref, **_):
+        calls.append(("merge", ref))
+        brain.update_task(int(ref[1:]), status="merged")
+        return {}
+
+    monkeypatch.setattr(svc, "assign", assign)
+    monkeypatch.setattr(svc, "review", review)
+    monkeypatch.setattr(svc, "merge", merge)
+    monkeypatch.setattr(svc, "workers", lambda fresh=False: {"claude": {"ready": True}, "codex": {"ready": True}})
+    return calls
+
+
+def test_autopilot_runs_the_plan_and_stops_only_for_what_a_person_decides(repo, monkeypatch):
+    from thoth_core import autopilot
+    svc, p = Thoth(mcp_launcher=None), str(repo)
+    svc.init(p, goal="A landing page")
+    svc.plan(p, [{"title": "Make the artwork", "agent": "codex", "kind": "asset"},
+                 {"title": "Build the page", "agent": "claude", "depends_on": [1]},
+                 {"title": "Check it", "agent": "codex", "kind": "qa", "depends_on": [2]}])
+    brain = Brain.open(repo)
+    calls = _fake_hands(svc, brain, monkeypatch)
+    svc.autopilot_start(p, hours=2, session="s1")
+    step = lambda: svc.autopilot_step(p)  # noqa: E731
+    assert step() == [] and calls == [("assign", "T1", "codex")]  # T2 waits until T1 is merged
+    brain.update_task(1, status="built")
+    assert [n["task"] for n in svc.needs(p)] == []  # autopilot reviews it itself: nothing to ask the user
+    step()
+    assert calls[-1] == ("review", "T1", "claude")  # the other agent reviews
+    brain.update_task(1, status="approved")
+    step()
+    assert calls[-1] == ("merge", "T1")
+    step()
+    assert calls[-1] == ("assign", "T2", "claude")
+    # Claude's plan runs out on T2: Codex carries on from its work, under the approved rules (not a plan change).
+    run = brain.add_run(task_id=2, agent="claude", kind="build", prompt="", actor="t")
+    brain.update_run(run["id"], status="failed", error="plan limit: Claude Code hit its plan limit; it resets later")
+    brain.update_task(2, status="failed")
+    step()
+    assert calls[-1] == ("assign", "T2", "codex") and autopilot.load(brain)["state"] == "running"
+    brain.update_task(2, status="approved")
+    step()
+    step()
+    assert ("merge", "T2") in calls and calls[-1] == ("assign", "T3", "codex")
+    # Codex is stuck on T3 and asks a question: autopilot asks the user through the chat, once.
+    run = brain.add_run(task_id=3, agent="codex", kind="build", prompt="", actor="t")
+    brain.update_run(run["id"], status="done", summary="Which browsers must it support?", report={"status": "blocked"})
+    brain.update_task(3, status="failed")
+    told = step()
+    assert len(told) == 1 and "T3" in told[0] and "stuck" in told[0] and "Which browsers" in told[0]
+    assert step() == [] and autopilot.view(brain)["held"][0]["task"] == "T3"
+    assert [n["task"] for n in svc.needs(p)] == ["T3"]  # what it waits for the user on still shows
+    # Answered and finished: everything is merged, and autopilot says the result is ready.
+    brain.update_task(3, status="approved")
+    step()
+    told = step()
+    assert autopilot.load(brain)["state"] == "done" and "finished" in told[0]
+    assert "Autopilot" not in (svc.status(p).get("autopilot") or "")  # nothing left to say once it is done
+
+
+def test_autopilot_pauses_on_a_plan_change_and_keeps_its_limits(repo, monkeypatch):
+    import time
+    from thoth_core import autopilot, plans
+    svc, p = Thoth(mcp_launcher=None), str(repo)
+    svc.init(p, goal="g")
+    svc.plan(p, [{"title": "A", "agent": "codex"}, {"title": "B", "agent": "claude"}])
+    brain = Brain.open(repo)
+    calls = _fake_hands(svc, brain, monkeypatch)
+    svc.autopilot_start(p, hours=1, session="s1")
+    svc.update_task(p, "T2", detail="B, in French")  # the plan changed after the user approved it
+    told = svc.autopilot_step(p)
+    assert autopilot.load(brain)["state"] == "paused" and calls == [] and "T2's instructions changed" in told[0]
+    assert "thoth_autopilot" in svc.status(p)["autopilot"]
+    # Approved again; the time limit passes before anything else happens.
+    svc.autopilot_start(p, hours=1, session="s1")
+    ap = autopilot.load(brain)
+    ap["until"] = time.time() - 1
+    autopilot.save(brain, ap)
+    told = svc.autopilot_step(p)
+    assert autopilot.load(brain)["state"] == "stopped" and "limit" in told[0] and calls == []
+    # The user keeps 20% of each plan: Codex at 85% means its task goes to Claude, and with both at it, it waits.
+    plans.save(svc.data_dir, "codex", plans.from_codex({"rateLimits": {"primary": {"usedPercent": 85, "windowDurationMins": 10080, "resetsAt": int(time.time()) + 3600}}}))
+    svc.autopilot_start(p, hours=1, session="s1")
+    svc.autopilot_step(p)
+    assert calls == [("assign", "T1", "claude"), ("assign", "T2", "claude")] and autopilot.load(brain)["state"] == "running"
+    plans.save(svc.data_dir, "claude", plans.from_claude({"status": "allowed", "unifiedWindows": {"seven_day": {"utilization": 0.9, "resetsAt": int(time.time()) + 3600}}}))
+    brain.update_task(2, status="todo")  # say T2 had not started yet
+    told = svc.autopilot_step(p)
+    assert "waiting" in told[0] and "keep 20%" in told[0] and len(calls) == 2 and svc.autopilot_step(p) == []
+    svc.autopilot_stop(p)
+    assert autopilot.view(brain) is None and svc.autopilot_step(p) == []
+
+
+def test_a_plan_card_shows_the_whole_plan_and_lapses_when_it_changes(repo):
+    plugin = _load_plugin()
+    ctx = FakeCtx()
+    plugin.register(ctx)
+    p = str(repo)
+    ctx.tools["thoth_init"]({"project": p, "goal": "A landing page"}, session_id="s1")
+    ctx.tools["thoth_plan"]({"project": p, "tasks": [{"title": "Make the artwork", "agent": "codex"},
+                                                     {"title": "Build the page", "agent": "claude", "depends_on": [1]}]}, session_id="s1")
+    start = {"project": p, "action": "start"}
+    assert not json.loads(ctx.tools["thoth_autopilot"](start, session_id="s1"))["ok"]  # never without the card
+    card = ctx.hooks["pre_tool_call"](tool_name="thoth_autopilot", args=start, session_id="s1")
+    assert card["action"] == "approve" and card["rule_key"].startswith("thoth:autopilot:")
+    assert "• T1 Codex · Make the artwork" in card["message"] and "after T1" in card["message"] and "merges what passes review" in card["message"]
+    assert ctx.hooks["pre_tool_call"](tool_name="thoth_autopilot", args={"project": p, "action": "status"}, session_id="s1") is None
+    Thoth(mcp_launcher=None).plan(p, [{"title": "Write the FAQ", "agent": "claude"}])  # added while the card waits
+    out = json.loads(ctx.tools["thoth_autopilot"](start, session_id="s1"))
+    assert not out["ok"] and out["plan_changed"] == ["T3 “Write the FAQ” was added"]
+    card2 = ctx.hooks["pre_tool_call"](tool_name="thoth_autopilot", args=start, session_id="s1")
+    assert card2["rule_key"] != card["rule_key"]  # a new plan is a new card: "always allow" never carries over
+    ran = json.loads(ctx.tools["thoth_autopilot"](start, session_id="s1"))
+    assert ran["ok"] and ran["autopilot"] == "running" and ran["tasks"] == ["T1", "T2", "T3"]
+    assert json.loads(ctx.tools["thoth_autopilot"]({"project": p, "action": "pause"}, session_id="s1"))["autopilot"] == "paused"
+
+
+def test_the_conductor_drives_a_plan_to_the_end_and_tells_the_chat(repo, monkeypatch):
+    # The whole loop as Hermes runs it: the conductor thread's loop, the registry, the lock, and the message at the
+    # end. Agents are stand-ins that finish at once (a real run would spend the user's plans).
+    plugin = _load_plugin()
+    ctx = FakeCtx()
+    plugin.register(ctx)
+    p = str(repo)
+    ctx.tools["thoth_init"]({"project": p, "goal": "A landing page"}, session_id="s1")
+    ctx.tools["thoth_plan"]({"project": p, "tasks": [{"title": "Make the artwork", "agent": "codex"},
+                                                     {"title": "Build the page", "agent": "claude", "depends_on": [1]}]}, session_id="s1")
+    brain = Brain.open(repo)
+    calls = []
+
+    def assign(self, project, ref, agent="", **_):
+        calls.append(("assign", ref, agent))
+        Brain.open(project).update_task(int(ref[1:]), status="built", agent=agent)  # finishes at once
+        return {}
+
+    def review(self, project, ref, reviewer="", **_):
+        calls.append(("review", ref, reviewer))
+        Brain.open(project).update_task(int(ref[1:]), status="approved")
+        return {}
+
+    def merge(self, project, ref, **_):
+        calls.append(("merge", ref))
+        Brain.open(project).update_task(int(ref[1:]), status="merged")
+        return {}
+
+    plugin_thoth = sys.modules["thoth_plugin.thoth_core.service"].Thoth  # the plugin's own copy of the service
+    monkeypatch.setattr(plugin_thoth, "assign", assign)
+    monkeypatch.setattr(plugin_thoth, "review", review)
+    monkeypatch.setattr(plugin_thoth, "merge", merge)
+    monkeypatch.setattr(plugin_thoth, "workers", lambda self, fresh=False: {"claude": {"ready": True}, "codex": {"ready": True}})
+    monkeypatch.setattr(sys.modules["thoth_plugin"], "CONDUCTOR_TICK", 0.01)
+    monkeypatch.setattr(sys.modules["thoth_plugin"], "_keep_awake", lambda: None)
+    ctx.hooks["pre_tool_call"](tool_name="thoth_autopilot", args={"project": p, "action": "start"}, session_id="s1")
+    assert json.loads(ctx.tools["thoth_autopilot"]({"project": p, "action": "start"}, session_id="s1"))["autopilot"] == "running"
+    plugin._plugin._drive()  # what the conductor thread runs; it returns once no autopilot is running
+    assert calls == [("assign", "T1", "codex"), ("review", "T1", "claude"), ("merge", "T1"),
+                     ("assign", "T2", "claude"), ("review", "T2", "codex"), ("merge", "T2")]
+    assert [m for m in ctx.injected if m.startswith("[Thoth autopilot")] == [
+        f"[Thoth autopilot · {repo.name}] Autopilot finished: all 2 tasks are merged into main. "
+        "Tell the user their result is ready, in a few lines (thoth_preview gives them a link)."]
+    assert json.loads(ctx.tools["thoth_autopilot"]({"project": p, "action": "status"}, session_id="s1"))["autopilot"]["state"] == "done"
+
+
+def test_offline_tests_can_never_start_a_real_agent(tmp_path):
+    # Every test runs with THOTH_NO_AGENTS: even a test that forgets a stand-in cannot spend anyone's plan.
+    from thoth_core.runner import RunManager
+    with pytest.raises(RuntimeError, match="THOTH_NO_AGENTS"):
+        RunManager().start(key="k", run_id=1, driver=None, cmd=["true"], prompt="", cwd=tmp_path, env={}, log_path=tmp_path / "R1.jsonl",
+                           timeout=1, on_progress=lambda *a: None, on_exit=lambda *a: None)
+
+
+def test_autopilot_runs_up_to_8_hours_by_default_and_24_at_most():
+    svc = Thoth(mcp_launcher=None)
+    assert svc._autopilot_hours() == 8 and svc._autopilot_hours(30) == 24 and svc._autopilot_hours(3) == 3
+    assert Thoth(mcp_launcher=None, settings={"autopilot_hours": 12})._autopilot_hours() == 12

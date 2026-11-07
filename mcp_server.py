@@ -30,7 +30,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))  # works under python -
 from thoth_core import __version__  # noqa: E402
 from thoth_core.brain import BrainError  # noqa: E402
 from thoth_core.dispatch import call  # noqa: E402
-from thoth_core.schemas import TOOLS, WORKER_TOOLS  # noqa: E402
+from thoth_core.schemas import HERMES_ONLY, TOOLS, WORKER_TOOLS  # noqa: E402
 from thoth_core.service import Thoth  # noqa: E402
 
 PROTOCOL_VERSION = "2025-06-18"
@@ -61,7 +61,7 @@ class Server:
         self.run_ref = args.run or ""
         self.task_ref = args.task or ""
         self.svc = Thoth(actor=self.actor)
-        self.names = WORKER_TOOLS if self.worker else tuple(TOOLS)
+        self.names = WORKER_TOOLS if self.worker else tuple(n for n in TOOLS if n not in HERMES_ONLY)
         self.inflight: list[threading.Thread] = []
 
     def instructions(self) -> str:

@@ -95,6 +95,15 @@ def call(svc: Thoth, name: str, args: dict[str, Any], default_project: Callable[
             outputs=[str(o) for o in args.get("outputs") or []], decisions=[str(x) for x in args.get("decisions") or []],
             handoff=str(args.get("handoff") or ""),
         )
+    if name == "thoth_autopilot":
+        action = str(args.get("action") or "status").lower()
+        if action == "start":
+            return svc.autopilot_start(project, hours=args.get("hours"), session=str(args.get("session") or ""))
+        if action == "pause":
+            return svc.autopilot_pause(project)
+        if action == "stop":
+            return svc.autopilot_stop(project)
+        return svc.autopilot_status(project)
     if name == "thoth_coordinator":
         result = svc.set_coordinator(project, str(args.get("agent") or ""))
         result["how_to_continue"] = coordinator_howto(result["coordinator"], result["project"])

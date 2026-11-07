@@ -1,5 +1,5 @@
 name: thoth
-version: 0.7.1
+version: 0.8.0
 manifest_version: 2
 api_version: 1
 description: >-
@@ -36,6 +36,7 @@ provides_tools:
   - thoth_sync
   - thoth_models
   - thoth_preview
+  - thoth_autopilot
 
 provides_hooks:
   - pre_tool_call
@@ -139,6 +140,16 @@ config_schema:
     default: []
     label: Environment variables to pass to agents
     description: Thoth strips API keys, tokens and Hermes variables from the agents' environment; list names to keep.
+  autopilot_hours:
+    type: int
+    default: 8
+    label: Autopilot time limit (hours)
+    description: Autopilot stops and asks you once a plan has run this long (up to 24).
+  autopilot_reserve_percent:
+    type: int
+    default: 20
+    label: Share of each plan autopilot leaves you (%)
+    description: Autopilot starts nothing with an agent whose plan is used past this point, and waits or uses the other agent instead.
   plan_usage:
     type: bool
     default: true
