@@ -338,8 +338,20 @@ function Peek ({ t, tk }) {
 }
 const capFirst = s => s ? s[0].toUpperCase() + s.slice(1) : s
 // The facts under a card: what it made, or what it waits for.
+// What the last finished build said about itself: "partial" (done, with things it could not do or check)
+// or "blocked" (it could not do the task). A blocked run is not a crash, so it reads "Blocked", not "Needs another try".
+function buildOutcome (tk) {
+  const b = [...tk.runs].reverse().find(r => r.kind === 'build' && !['queued', 'running'].includes(r.status))
+  const rep = b && b.report && typeof b.report === 'object' ? b.report : {}
+  const limits = (Array.isArray(rep.limits) ? rep.limits : []).map(String).filter(s => s.trim())
+  return { blocked: !!b && b.status === 'done' && String(rep.status || '').toLowerCase() === 'blocked', limits, reason: (b && b.summary) || '' }
+}
+const pillLabel = (t, tk) => t.status === 'failed' && buildOutcome(tk).blocked ? 'Blocked' : undefined
+// A blocked agent's reason, whole when it is short (it often ends in the question it needs answered).
+const shortReason = s => { s = String(s || '').trim(); if (s.length <= 240) return s; const m = s.match(/^[\s\S]{1,200}?[.!?](\s|$)/); return m ? m[0].trim() : s.slice(0, 200) + '…' }
 function cardMeta (t, tk, d) {
   if (!t.branch) { const deps = t.depends_on.map(id => (d.byTask[id] || {}).ref).filter(Boolean); return deps.length ? 'after ' + deps.join(', ') : 'Not started' }
+  if (t.status === 'built') { const n = buildOutcome(tk).limits.length; if (n) return n + ' not checked' }
   return [tk.produced.length ? plural(tk.produced.length, 'file') : '', tk.add ? '+' + tk.add : ''].filter(Boolean).join(' · ')
 }
 const Mini = ({ agent, size = 20 }) => h('span', { className: 'th-mini th-mini-' + agent, style: { width: size, height: size }, title: AGENTS[agent].name }, h(Logo, { agent, size }))
@@ -802,7 +814,7 @@ function Canvas ({ snap, d, selected, select, project, inset = 0, onBackground =
             h(Pair, { agent, reviewer: t.status !== 'todo' ? tk.reviewer : null, live: tk.open }),
             h('div', { className: 'th-node-tx' }, h('div', { className: 'th-node-ttl', title: t.title }, t.title), h('div', { className: 'th-node-sub' }, label + ' · ' + t.ref))),
           h('div', { key: 'f', className: 'th-node-ft' },
-            tk.open ? h(StatusPill, { status: 'running', label: capFirst(humanize(tk.open.progress)) || (tk.open.kind === 'review' ? 'Reviewing' : 'Working') }) : h(StatusPill, { status: t.status }),
+            tk.open ? h(StatusPill, { status: 'running', label: capFirst(humanize(tk.open.progress)) || (tk.open.kind === 'review' ? 'Reviewing' : 'Working') }) : h(StatusPill, { status: t.status, label: pillLabel(t, tk) }),
             tk.open ? h(Elapsed, { since: tk.open.started_at || tk.open.created_at, className: 'th-node-meta' }) : h('span', { className: 'th-node-meta', title: tk.produced.join('\n') }, cardMeta(t, tk, d))),
           (() => {
             const behind = behindOf(snap, d, t)
@@ -903,7 +915,7 @@ function TaskCard ({ t, tk, sel, select, d }) {
     total ? h('span', { className: 'th-prog' }, h('span', { className: 'th-lbl' }, `${total - open} of ${total} fixed`), h('span', { className: 'th-track' }, h('span', { style: { width: (total - open) / total * 100 + '%' } }))) : null,
     total ? h('div', { className: 'th-tree' }, tk.issues.slice(0, 3).map((i, n) => h('div', { key: n, className: 'th-it' + (i.done ? ' th-done' : '') }, h(Check, { done: i.done }), h('span', null, i.text.length > 70 ? i.text.slice(0, 68) + '…' : i.text)))) : null,
     h('div', { className: 'th-tfoot' },
-      tk.open ? h(StatusPill, { status: 'running', label: capFirst(humanize(tk.open.progress)) || 'Working' }) : h(StatusPill, { status: t.status }),
+      tk.open ? h(StatusPill, { status: 'running', label: capFirst(humanize(tk.open.progress)) || 'Working' }) : h(StatusPill, { status: t.status, label: pillLabel(t, tk) }),
       tk.open ? h(Elapsed, { since: tk.open.started_at || tk.open.created_at, className: 'th-node-meta' }) : h('span', { className: 'th-node-meta' }, cardMeta(t, tk, d))))
 }
 
@@ -955,10 +967,18 @@ function taskNext (snap, d, t) {
     const deps = t.depends_on.map(id => (d.byTask[id] || {}).ref).filter(Boolean)
     switch (t.status) {
       case 'todo': hint = deps.length ? `Starts from the newest files of ${deps.join(', ')}.` : `${A(agent)} hasn’t started yet.`; btns = [assign('Start ' + S(agent))]; break
-      case 'built': hint = `Built. A review by ${A(tk.reviewer)} catches bugs before they reach ${base}.`; btns = [review(p), merge(false)]; break
+      case 'built': {
+        const lim = buildOutcome(tk).limits
+        hint = lim.length ? `Built, but ${A(agent)} couldn’t check ${lim.length === 1 ? lim[0] : lim.length + ' things: ' + lim.join('; ')}. A review by ${A(tk.reviewer)} can cover them.` : `Built. A review by ${A(tk.reviewer)} catches bugs before they reach ${base}.`
+        btns = [review(p), merge(false)]; break
+      }
       case 'changes': hint = `${open || 'Some'} review comment${open === 1 ? '' : 's'} to fix — ${A(agent)} gets them in its brief.`; btns = [assign('Send back to ' + S(agent)), merge(false, true)]; break
       case 'approved': hint = `Review passed — ready for ${base}.`; btns = [merge(p)]; break
-      case 'failed': hint = 'The last run failed. A retry starts with the error in its brief.'; btns = [assign('Retry with ' + S(agent))]; break
+      case 'failed': {
+        const o = buildOutcome(tk)
+        hint = o.blocked ? `${A(agent)} stopped: ${shortReason(o.reason)} Answer it in the chat or change the task, then retry.` : 'The last run failed. A retry starts with the error in its brief.'
+        btns = [assign('Retry with ' + S(agent))]; break
+      }
       case 'conflict': hint = `Can’t merge cleanly into ${base}. ${A(agent)} can reconcile it.`; btns = [assign('Send back to ' + S(agent))]; break
       case 'cancelled': hint = 'Stopped. You can start it again any time.'; btns = [assign('Start again')]; break
       case 'merged': hint = `Merged into ${base}. Add a task to build on it.`; break
@@ -993,7 +1013,7 @@ function TaskPeek ({ snap, d, selected, expand, close }) {
     h('div', { className: 'th-tpk-state' },
       tk.open
         ? h('span', { className: 'th-tpk-live', title: tk.open.progress || '' }, h(Mini, { agent: tk.open.agent, size: 18 }), h('b', null, tk.open.kind === 'review' ? 'Reviewing' : 'Working'), h('span', null, humanize(tk.open.progress)), h(Elapsed, { since: tk.open.started_at || tk.open.created_at }))
-        : h(StatusPill, { status: t.status, agent }),
+        : h(StatusPill, { status: t.status, agent, label: pillLabel(t, tk) }),
       !tk.open && hint ? h('span', { className: 'th-tpk-hint', title: hint }, hint) : null),
     err ? h('div', { className: 'th-tpk-err', title: err }, h(Icon, { name: 'alert', size: 13 }), h('span', null, (last.kind === 'review' ? 'The review stopped: ' : 'The run stopped: ') + err)) : null,
     h('div', { className: 'th-tpk-facts' },
@@ -1056,7 +1076,7 @@ function Inspector ({ snap, d, selected, tab, setTab, close }) {
       h('div', { key: 't', className: 'th-tree' }, tk.issues.map((i, n) => h('div', { key: n, className: 'th-it' + (i.done ? ' th-done' : '') }, h(Check, { done: i.done }), h('span', { style: { minWidth: 0 } }, i.loc ? h('span', { className: 'th-mono th-muted', style: { display: 'block', overflowWrap: 'anywhere' } }, i.loc) : null, i.text))))
     ] : null,
     h('div', { className: 'th-props', style: { gridTemplateColumns: '84px minmax(0,1fr)' } },
-      h('span', { className: 'th-k' }, h(Icon, { name: 'flag', size: 14 }), 'Status'), h('span', null, h(StatusPill, { status: t.status, agent: tk.open ? tk.open.agent : agent })),
+      h('span', { className: 'th-k' }, h(Icon, { name: 'flag', size: 14 }), 'Status'), h('span', null, h(StatusPill, { status: t.status, agent: tk.open ? tk.open.agent : agent, label: tk.open ? undefined : pillLabel(t, tk) })),
       h('span', { className: 'th-k' }, h(Icon, { name: 'build', size: 14 }), 'Builder'), h('span', { className: 'th-person' }, h(Mini, { agent }), A(agent)),
       h('span', { className: 'th-k' }, h(Icon, { name: 'review', size: 14 }), 'Reviewer'), h('span', { className: 'th-person' }, h(Mini, { agent: tk.reviewer }), A(tk.reviewer)),
       h('span', { className: 'th-k' }, h(Icon, { name: 'chip', size: 14 }), 'Model'), h('span', null, h(ModelPicker, { agent, model: t.model || '', effort: t.effort || '', onChange: v => act({ action: 'update', task: t.ref, model: v.model, effort: v.effort }, () => `${t.ref} will use ${modelLabel(agent, v.model)}${v.effort ? ' · ' + v.effort + ' effort' : ''}`) })),

@@ -578,6 +578,8 @@ class Thoth:
             except Exception as exc:
                 logger.warning("thoth: commit after R%s failed: %s", run_id, exc)
                 fields["error"] = (fields["error"] + f"; commit failed: {exc}").strip("; ")
+            # "partial" is finished work with things the agent could not do or check: it goes to review like
+            # any build, and what it could not check stays on the task for the reviewer and the next brief.
             if status == "done" and str(report.get("status", "done")).lower() != "blocked":
                 new_status = "built"
             elif status == "cancelled":
@@ -585,6 +587,9 @@ class Thoth:
             else:
                 new_status = "failed"
             brain.update_task(task["id"], status=new_status)
+            for limit in _as_list(report.get("limits"))[:8]:
+                if str(limit).strip():
+                    brain.add_note(kind="risk", author=author, body=f"Not checked: {str(limit).strip()}", task_id=task["id"], run_id=run_id)
             for decision in _new_only(brain, run_id, "decision", _as_list(report.get("decisions"))):
                 brain.add_note(kind="decision", author=author, body=decision, task_id=task["id"], run_id=run_id)
             if str(report.get("handoff") or "").strip():
@@ -964,6 +969,10 @@ class Thoth:
             last_review = next((r for r in runs if r["kind"] == "review" and r["status"] == "done"), None)
             reviewer = last_review["agent"] if last_review else _other(t["agent"] or "claude")
             last = runs[0] if runs else None
+            last_build = next((r for r in runs if r["kind"] == "build" and r["status"] in TERMINAL_RUN_STATUSES), None)
+            build_report = (last_build or {}).get("report") if isinstance((last_build or {}).get("report"), dict) else {}
+            outcome = str(build_report.get("status") or "").lower()
+            limits = [str(x) for x in _as_list(build_report.get("limits")) if str(x).strip()]
             if t["status"] == "conflict":
                 out.append({"id": f"conflict-{t['ref']}", "kind": "conflict", "task": t["ref"], "who": t["agent"], "priority": 0,
                             "title": f"Merge conflict on {t['ref']}", "detail": "The base branch is unchanged. Reconcile the branches, then merge again.", "tool": "thoth_assign"})
@@ -982,12 +991,18 @@ class Thoth:
                     out.append({"id": f"fix-{t['ref']}", "kind": "fix", "task": t["ref"], "who": reviewer, "priority": 2,
                                 "title": f"{n or 'Some'} change{'s' if n != 1 else ''} asked on {t['ref']}", "detail": f"{_name(t['agent'])} can pick them up in its last session", "tool": "thoth_assign"})
             elif t["status"] == "failed":
-                err = (last or {}).get("error") or (last or {}).get("summary") or ""
+                # An agent that finished and said it was blocked is not a crash: say so, with its reason.
+                said_blocked = bool(last_build) and last_build["status"] == "done" and outcome == "blocked"
+                err = ((last_build or {}).get("summary") if said_blocked else "") or (last or {}).get("error") or (last or {}).get("summary") or ""
                 out.append({"id": f"retry-{t['ref']}", "kind": "retry", "task": t["ref"], "who": t["agent"], "priority": 2,
-                            "title": f"{t['ref']} needs another try", "detail": err[:160] or "The last run did not finish", "tool": "thoth_assign"})
+                            "title": f"{t['ref']} is blocked" if said_blocked else f"{t['ref']} needs another try",
+                            "detail": err[:160] or "The last run did not finish", "tool": "thoth_assign"})
             elif t["status"] == "built":
+                detail = f"Ask {_name(_other(t['agent'] or 'claude'))} to review it"
+                if limits:
+                    detail += f" · {_name(t['agent'] or 'claude')} couldn't check {len(limits)} thing{'s' if len(limits) != 1 else ''}"
                 out.append({"id": f"review-{t['ref']}", "kind": "review", "task": t["ref"], "who": t["agent"], "priority": 3,
-                            "title": f"{t['ref']} is built and waiting for review", "detail": f"Ask {_name(_other(t['agent'] or 'claude'))} to review it", "tool": "thoth_review"})
+                            "title": f"{t['ref']} is built and waiting for review", "detail": detail, "tool": "thoth_review"})
         out.sort(key=lambda n: n["priority"])
         return out
 
@@ -1166,6 +1181,13 @@ class Thoth:
                 out["commit"] = run["commit_after"][:7]
             if run["kind"] == "review" and isinstance(run.get("report"), dict):
                 out["verdict"] = run["report"].get("verdict", "")
+            if run["kind"] == "build" and isinstance(run.get("report"), dict):
+                outcome = str(run["report"].get("status") or "").lower()
+                if outcome in ("partial", "blocked"):
+                    out["outcome"] = outcome
+                limits = [str(x).strip() for x in _as_list(run["report"].get("limits")) if str(x).strip()]
+                if limits:
+                    out["limits"] = limits[:8]
                 out["comments"] = _as_list(run["report"].get("comments"))
             if run["started_at"] and run["ended_at"]:
                 out["seconds"] = round(run["ended_at"] - run["started_at"])

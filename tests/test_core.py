@@ -787,3 +787,32 @@ def test_a_chat_that_names_a_project_is_about_that_project(repo, tmp_path, monke
     assert inst.project_for({}, "chat-n1") == str(repo)
     assert hook(session_id="chat-n2", user_message=f"is {repo.name}x related?") is None  # part of a longer word
     assert hook(session_id="chat-n3", user_message="what about ab?") is None
+
+
+def test_partial_runs_go_to_review_with_their_limits_and_blocked_ones_say_why(repo):
+    from thoth_core.agents import RunState
+    svc = Thoth(mcp_launcher=None)
+    svc.init(str(repo))
+    svc.plan(str(repo), [{"title": "Check the game in a browser", "agent": "codex"}, {"title": "Build the page", "agent": "claude"}])
+    brain = Brain.open(repo)
+    for tid in (1, 2):
+        svc._prepare_worktree(brain, brain.task(tid))
+        brain.update_task(tid, status="running")
+    # finished the check, but its tools could not send real touch or held keys
+    r1 = brain.add_run(task_id=1, agent="codex", kind="build", prompt="", actor="t")
+    report = {"status": "partial", "summary": "Played it in a clean Chrome; no defects.", "limits": ["native touch input", "held arrow keys"]}
+    svc._finalize(brain, r1["id"], RunState(final_text="THOTH_REPORT " + json.dumps(report)), 0, "")
+    assert brain.task(1)["status"] == "built"
+    assert "Not checked: native touch input" in [n["body"] for n in brain.notes(task_id=1, kinds=("risk",))]
+    need = next(n for n in svc.needs(str(repo)) if n["task"] == "T1")
+    assert need["kind"] == "review" and "couldn't check 2 things" in need["detail"]
+    told = svc._run_brief(brain.run(r1["id"]), brain.task(1))
+    assert told["outcome"] == "partial" and told["limits"] == report["limits"]
+    # could not do the task at all: blocked, with its reason, not "needs another try"
+    r2 = brain.add_run(task_id=2, agent="claude", kind="build", prompt="", actor="t")
+    svc._finalize(brain, r2["id"], RunState(final_text='THOTH_REPORT {"status": "blocked", "summary": "The spec names a file that does not exist."}'), 0, "")
+    assert brain.task(2)["status"] == "failed"
+    need = next(n for n in svc.needs(str(repo)) if n["task"] == "T2")
+    assert need["title"] == "T2 is blocked" and "does not exist" in need["detail"]
+    # the brief offers the middle way
+    assert "partial" in build_brief(brain, brain.task(1), agent="codex")

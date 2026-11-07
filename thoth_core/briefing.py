@@ -92,17 +92,24 @@ def _report_instructions(kind: str) -> str:
         }
     else:
         example = {
-            "status": "done | blocked",
+            "status": "done | partial | blocked",
             "summary": "one paragraph on what you built and how",
             "decisions": ["at most 3 NEW rules other agents must follow, one short sentence each (omit ones already recorded)"],
             "handoff": "what the next agent needs to know (empty if nothing)",
             "outputs": ["path/to/file — what it is (every file you produced for others to use)"],
             "risks": ["anything fragile or untested"],
+            "limits": ["something you could not do or check, and why (empty when nothing)"],
         }
+    status_words = "" if kind == "review" else (
+        "\n`status`: `done` when the task is done; `partial` when you did the task but could not do or check part of it "
+        "(say what in `limits`; your work still goes to review); `blocked` only when you could not do the task at all "
+        "(say why in `summary`).\n"
+    )
     return (
         "\n## When you finish\n"
         f"End your final message with the line `{REPORT_MARKER}` followed by a JSON object, exactly like:\n\n"
         f"{REPORT_MARKER}\n```json\n{json.dumps(example, indent=2)}\n```\n"
+        + status_words
     )
 
 

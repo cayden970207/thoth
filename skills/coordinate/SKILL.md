@@ -32,6 +32,11 @@ take re-reads your whole context, so doing the work yourself costs far more than
    - **codex**: algorithms, tests, scripts, data handling, precise edits.
 4. **Run in parallel.** Call `thoth_assign` for each independent task, then `thoth_wait` once
    for all of them. Each agent works in its own worktree; they cannot overwrite each other.
+   - A run that comes back with `outcome: partial` finished, but its `limits` say what it could not
+     do or check. Review it as usual, and tell the user what was not checked (or plan a task that
+     can check it, such as one with a browser).
+   - `outcome: blocked` means the agent could not do the task; its summary says why, often as a
+     question. Ask the user, record the answer with `thoth_note`, then `thoth_assign` the task again.
 5. **Cross-review.** `thoth_review(task)` puts the *other* agent on a read-only review.
    - `approved` → `thoth_merge(task)`.
    - `changes` → `thoth_assign(task)` again. The same agent resumes its session and the review
