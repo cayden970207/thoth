@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import shlex
 import sys
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 from .brain import BrainError
+from .plans import default_data_dir
 from .service import Thoth
 
 
@@ -18,23 +20,25 @@ def mcp_server_path() -> Path:
 def coordinator_howto(agent: str, project: str) -> str:
     server = mcp_server_path()
     py = sys.executable
+    data = shlex.quote(str(default_data_dir()))
     if agent == "claude":
         return (
             "Claude Code now coordinates. One-time setup (registers the Thoth MCP server in Claude Code for this project):\n"
-            f"  cd {project} && claude mcp add thoth -- {py} -I {server} --as claude\n"
+            f"  cd {project} && claude mcp add thoth -- {py} -I {server} --as claude --data-dir {data}\n"
             "Then open `claude` in the project and say, e.g.: \"You are the Thoth coordinator. Call thoth_status and continue the plan.\""
         )
     if agent == "codex":
         return (
             "Codex now coordinates. One-time setup (registers the Thoth MCP server in Codex):\n"
-            f"  codex mcp add thoth -- {py} -I {server} --as codex\n"
+            f"  codex mcp add thoth -- {py} -I {server} --as codex --data-dir {data}\n"
             "Then run `codex` in the project and say, e.g.: \"You are the Thoth coordinator. Call thoth_status and continue the plan.\""
         )
     return "Hermes coordinates again. Ask Hermes for the Thoth status to pick up where the others left off."
 
 
-def call(svc: Thoth, name: str, args: dict[str, Any], default_project: Callable[[], str]) -> dict:
-    """Run one tool. Raises BrainError for user-facing problems."""
+def call(svc: Thoth, name: str, args: dict[str, Any], default_project: Callable[[], str], approved: bool = False) -> dict:
+    """Run one tool. Raises BrainError for user-facing problems. ``approved`` only ever comes from Hermes, for a call
+    the user said yes to on its card; the MCP server never passes it."""
     args = dict(args or {})
     project = str(args.pop("project", "") or "").strip() or default_project()
     if not project:
@@ -42,7 +46,7 @@ def call(svc: Thoth, name: str, args: dict[str, Any], default_project: Callable[
     if name == "thoth_init":
         setup, run = args.get("setup"), args.get("run")
         return svc.init(project, goal=str(args.get("goal") or ""), setup=None if setup is None else str(setup), create=bool(args.get("create")),
-                        run=None if run is None else str(run))
+                        run=None if run is None else str(run), approve=approved)
     if name == "thoth_preview":
         return svc.preview(project, task=args.get("task") or None)
     if name == "thoth_plan":

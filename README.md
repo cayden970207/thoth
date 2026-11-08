@@ -256,6 +256,17 @@ For a full install per task, give the project a setup command — `thoth_init(se
 Thoth runs in each new worktree before the agent starts, outside the sandbox and only after you approve
 it. Thoth never reads or copies `.env` files or other secrets into a worktree.
 
+**Only boards and commands you approved here.** A project's board can arrive with its folder (a clone, a
+download, a copy), so Thoth uses a board only if it made it on this computer, or you said yes to it once on a
+Hermes card. Saying yes keeps the board's plan and history and nothing else: autopilot stays off, tasks start over
+in new task folders, and whatever else came in `.thoth` moves to `.thoth/arrived-<time>/`. Setup and run commands
+run as you, with network access, so Thoth also keeps a record of the commands you approved on Hermes's card for each
+board, and runs nothing else: a command that arrives with a project, one set by Claude Code or Codex while
+coordinating, or an older project's command waits until Hermes shows it to you. Starting the app for a preview asks
+you each time unless you always allow that command. Both records are hashes in Thoth's data folder, never in the
+project. Thoth also won't use a project whose `.thoth` folder is committed to git, won't make a board in a `.thoth`
+folder it didn't make, and its own git commands never run git hooks.
+
 **Hearing back in chat.** When an agent finishes, Thoth can tell the chat that started it, with one
 message for a batch of runs and nothing for results `thoth_wait` already returned. Hermes keeps this off
 until you allow it for Thoth:
@@ -338,9 +349,10 @@ plan it leaves you (default 20 %).
   the run-scoped Thoth MCP server is started with `default_tools_approval_mode="approve"`. In worker
   mode that server exposes only `thoth_status`, `thoth_context` and `thoth_note` (read the brain,
   write a note); it cannot start agents or touch files.
-- **Strips the environment** passed to agents: variables ending in `_API_KEY`, `_TOKEN`, `_SECRET`,
-  `_PASSWORD`, and `HERMES_*`, `ANTHROPIC_*`, `OPENAI_*`, `CLAUDE_CODE_*`, `CODEX_*` (except `CODEX_HOME`)
-  are removed unless you list them in `env_passthrough`.
+- **Passes agents and project commands a minimal environment**: only `PATH`, `HOME`, `USER`, `SHELL`,
+  `TMPDIR`, `TERM`, `LANG`, the standard `LC_` locale settings, `CODEX_HOME` and `CLAUDE_CONFIG_DIR` (where Codex and Claude Code keep their
+  logins, when you moved them), plus what you list in `env_passthrough` (for example a proxy or a certificate
+  file your network needs). No API keys, tokens or Hermes settings reach them.
 - **Writes into your project**: `.thoth/` (SQLite brain, `BRAIN.md`, run logs with the agents' full
   JSON output, worktrees), one line in `.git/info/exclude`, git branches `thoth/T<n>-…`, commits
   authored `Thoth <thoth@localhost>` on those branches, and merge commits on your base branch when
@@ -357,7 +369,17 @@ plan it leaves you (default 20 %).
   killed (whole process group) on cancel, timeout, plugin unload and Hermes exit.
 - **Run previews**: with a project run command (approved by you), Thoth exports the version you open to
   `.thoth/previews/` and starts that command there as you, outside the agents' sandbox, on a free localhost
-  port. At most 4 apps run at once; they stop when Hermes exits, and leftovers are stopped on the next start.
+  port, after Hermes asks you (the card shows the command). At most 4 apps run at once; they stop when Hermes
+  exits, and leftovers are stopped on the next start.
+- **What you approved**: Thoth uses a board only if it made it on this computer or you said yes to it on a Hermes
+  card (it then keeps the plan and history, moves everything else in `.thoth` to `.thoth/arrived-<time>/` and
+  clears the folders, branches, commits and sessions the board names), and runs a setup or run command only if you
+  approved that exact command for that board on Hermes's card for `thoth_init`. A board is known by its folder's
+  and database file's inode numbers and a random id Thoth writes into it. The records are hashes in
+  `approvals.json` in Thoth's data folder, never in the project. A project whose `.thoth` folder is committed to
+  git is refused, and so is making a board in a `.thoth` folder Thoth didn't make. A task folder is used only at
+  `.thoth/worktrees/<task>` and only if git lists it. Thoth's own git commands run without git hooks or a
+  filesystem monitor.
 - **Previews**: when you (or Hermes) open a preview, a static file server listens on `127.0.0.1` on a
   free port for that task's folder, inside the Hermes process. It only answers GET/HEAD and never serves
   hidden paths. At most 8 run at once.

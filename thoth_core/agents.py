@@ -28,38 +28,31 @@ from typing import Any
 
 from . import plans
 
-# Environment variables that must not leak from the host into an agent CLI:
-# provider keys and tokens (agents use their own logins), Hermes internals, and
-# variables set by a parent Claude Code / Agent SDK process that would make a
-# nested ``claude`` talk to the wrong endpoint with the wrong token.
-_ENV_DROP_PATTERNS = [
-    re.compile(p)
-    for p in (
-        r".*_API_KEY$",
-        r".*_TOKEN$",
-        r".*_SECRET$",
-        r".*_PASSWORD$",
-        r"^HERMES_.*",
-        r"^CLAUDE_CODE_.*",
-        r"^CLAUDE_AGENT_SDK_.*",
-        r"^CLAUDECODE$",
-        r"^ANTHROPIC_.*",
-        r"^OPENAI_.*",
-        r"^CODEX_.*",
-    )
-]
-# CODEX_HOME is how Codex finds its own login; keep it if the user set it.
-_ENV_ALWAYS_KEEP = {"CODEX_HOME", "PATH", "HOME", "USER", "LANG", "SHELL", "TMPDIR"}
+# What an agent CLI, a project setup or run command, and the agents' own helper commands get from Hermes's
+# environment: only what a program needs to find other programs, the home folder, the temp folder and the language,
+# plus where Codex and Claude Code keep their own logins (CODEX_HOME, CLAUDE_CONFIG_DIR, when the user moved them)
+# and the names the user lists in ``env_passthrough``. Nothing else: no provider keys or tokens (agents use their own
+# logins), none of Hermes's settings, none of a parent Claude Code's variables.
+ENV_KEEP = frozenset({
+    "PATH", "HOME", "USER", "SHELL", "TMPDIR", "TERM", "CODEX_HOME", "CLAUDE_CONFIG_DIR",
+    "LANG", "LC_ALL", "LC_CTYPE", "LC_COLLATE", "LC_MESSAGES", "LC_MONETARY", "LC_NUMERIC", "LC_TIME",
+})
 
 
 def clean_env(passthrough: list[str] | tuple[str, ...] = ()) -> dict[str, str]:
-    keep = set(_ENV_ALWAYS_KEEP) | set(passthrough)
-    env = {}
-    for key, value in os.environ.items():
-        if key in keep or not any(p.match(key) for p in _ENV_DROP_PATTERNS):
-            env[key] = value
+    keep = ENV_KEEP | {str(name) for name in passthrough}
+    env = {key: value for key, value in os.environ.items() if key in keep}
     env["THOTH_CHILD"] = "1"
     return env
+
+
+# A session id resumes an agent's earlier session. It comes from the agent's own output, but it is stored in the
+# board, so only a plain id may reach a command line (never one that reads as an option).
+_SESSION_ID = re.compile(r"[0-9A-Za-z][0-9A-Za-z_-]{7,127}")
+
+
+def safe_session(session_id: str) -> str:
+    return session_id if session_id and _SESSION_ID.fullmatch(session_id) else ""
 
 
 @dataclass
@@ -243,6 +236,7 @@ class ClaudeDriver(Driver):
 
     def command(self, *, kind: str, session_id: str, mcp: McpSpec | None, model: str = "", effort: str = "", name: str = "",
                 browser: McpSpec | None = None) -> list[str]:
+        session_id = safe_session(session_id)
         cmd = [self.resolve() or self.binary, "-p", "--output-format", "stream-json", "--verbose"]
         if name:
             cmd += ["--name", name[:80]]
@@ -399,6 +393,7 @@ class CodexDriver(Driver):
 
     def command(self, *, kind: str, session_id: str, mcp: McpSpec | None, model: str = "", effort: str = "", name: str = "",
                 browser: McpSpec | None = None) -> list[str]:
+        session_id = safe_session(session_id)
         exe = self.resolve() or self.binary
         sandbox = "read-only" if kind == "review" else "workspace-write"
         if session_id:

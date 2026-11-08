@@ -19,9 +19,9 @@ from pathlib import Path
 from typing import Any
 
 from . import browser as web
-from . import autopilot, folders, gitops, keptout, plans, preview
+from . import approvals, autopilot, folders, gitops, keptout, plans, preview
 from .agents import McpSpec, RunState, clean_env, driver_for
-from .brain import NOTE_KINDS, TASK_KINDS, OPEN_RUN_STATUSES, Brain, BrainError, find_brain_root, parse_id, rid, tid
+from .brain import BRAIN_DIRNAME, NOTE_KINDS, TASK_KINDS, OPEN_RUN_STATUSES, Brain, BrainError, committed, committed_message, find_brain_root, parse_id, rid, tid
 from .briefing import ago, board_lines, build_brief, parse_report, review_brief, strip_report
 from .runner import RunManager, kill_group, pid_alive
 
@@ -109,20 +109,31 @@ class Thoth:
 
     # -- project -----------------------------------------------------------------
 
-    def init(self, project_dir: str, goal: str = "", setup: str | None = None, create: bool = False, run: str | None = None) -> dict:
+    def init(self, project_dir: str, goal: str = "", setup: str | None = None, create: bool = False, run: str | None = None,
+             approve: bool = False) -> dict:
+        """Start or reopen a project. ``approve`` is True only when the user said yes to this exact call on Hermes's
+        card (see __init__.py): then the commands it sets are recorded as approved for this board, and a board Thoth
+        hasn't used here before is adopted. Without it (the MCP server), commands are stored but wait for that card,
+        and such a board is refused (thoth_core/approvals.py)."""
+        setup = None if setup is None else approvals.clean("setup", setup)
+        run = None if run is None else approvals.clean("run", run)
         setting = self.settings.get("projects_dir")
-        folder = Path(project_dir).expanduser()
-        if create and not folder.is_absolute() and folder.parts:
-            # A new project named by a short name goes in the projects folder, never next to this process.
-            folder = folders.projects_home(setting) / folder
+        folder, top, new_repo = self._where(project_dir, create)
         if folder.exists() and not folder.is_dir():
             raise BrainError(f"{folders.tilde(folder)} is a file, not a folder.")
         if not folder.exists() and not create:
             raise BrainError(f"{folders.tilde(folder)} does not exist. To start a new project there, call thoth_init with create=true.")
-        top = gitops.git(folder, "rev-parse", "--show-toplevel", check=False) if folder.exists() else ""
-        # A new project, or a plain folder (also one inside a big folder kept in git, such as a home folder):
-        # Thoth makes its own repository, so it can keep every version.
-        new_repo = not top or (bool(folders.personal(top)) and folders.resolved(top) != folders.resolved(folder))
+        # Before Thoth changes anything in the folder: a board it doesn't know needs the user's yes (on Hermes's
+        # card), and it never makes a board inside a .thoth folder that something else filled.
+        home = folder if new_repo else Path(top)
+        board = home / BRAIN_DIRNAME
+        has_board = (board / "brain.db").is_file()
+        adopt = has_board and not approvals.trusted(self.data_dir, home)
+        if adopt and not approve:
+            raise BrainError(approvals.untrusted_message(home))
+        if not has_board and (board.is_symlink() or (board.exists() and (not board.is_dir() or any(board.iterdir())))):
+            raise BrainError(f"{home.name} already has a .thoth folder that Thoth didn't make, so Thoth won't make a board "
+                             "in it. Move that folder away or delete it, then try again.")
         made = made_repo = False
         survey = None
         if new_repo:
@@ -145,6 +156,8 @@ class Thoth:
         why = "" if made_repo else folders.personal(root)
         if why:
             raise BrainError(self._not_a_project(root, why))
+        if not made_repo and committed(root):  # a .thoth that came with the repository is never reused
+            raise BrainError(committed_message(root))
         gitops.exclude_brain_dir(root)
         created_commit = False
         saved = 0
@@ -156,17 +169,21 @@ class Thoth:
             created_commit = True
         if find_brain_root(root) == root:
             brain = Brain.open(root)
+            if adopt:
+                self._adopt(brain)
             if goal:
                 brain.set_meta("goal", goal)
                 brain.event(self.actor, "goal", goal)
             existed = True
         else:
             brain = Brain.create(root, goal=goal, base_branch=gitops.current_branch(root), actor=self.actor)
+            approvals.trust(self.data_dir, root)  # Thoth made this board here
             existed = False
-        if setup is not None:
-            brain.set_meta("setup", setup.strip())
-        if run is not None:
-            brain.set_meta("run", run.strip())
+        for kind, command in (("setup", setup), ("run", run)):
+            if command is not None:
+                brain.set_meta(kind, command)
+                if approve:
+                    approvals.approve(self.data_dir, root, kind, command)
         brain.write_snapshot()
         result = self.status(str(root))
         result["initialized"] = not existed
@@ -182,6 +199,23 @@ class Thoth:
             result["note"] = "The repository had no commits, so Thoth made an empty initial commit to branch from."
         return result
 
+    def _where(self, project_dir: str, create: bool = False) -> tuple[Path, str, bool]:
+        """The folder thoth_init works on, git's top level for it ("" when there is none), and whether Thoth makes a
+        new repository there: for a new project, or a plain folder (also one inside a big folder kept in git, such as
+        a home folder), so it can keep every version."""
+        folder = Path(project_dir).expanduser()
+        if create and not folder.is_absolute() and folder.parts:
+            # A new project named by a short name goes in the projects folder, never next to this process.
+            folder = folders.projects_home(self.settings.get("projects_dir")) / folder
+        top = gitops.git(folder, "rev-parse", "--show-toplevel", check=False) if folder.is_dir() else ""
+        new_repo = not top or (bool(folders.personal(top)) and folders.resolved(top) != folders.resolved(folder))
+        return folder, top, new_repo
+
+    def board_home(self, project_dir: str, create: bool = False) -> Path:
+        """Where thoth_init finds or makes the board for this folder (what its approval card must be about)."""
+        folder, top, new_repo = self._where(project_dir, create)
+        return folder if new_repo else Path(top)
+
     def _not_a_project(self, folder: Path, why: str) -> str:
         home = folders.tilde(folders.projects_home(self.settings.get("projects_dir")))
         return (f"Thoth won't make {folders.tilde(folder)} a project: {why}. For a new project, call thoth_init with "
@@ -189,9 +223,35 @@ class Thoth:
                 "full path of one project's own folder.")
 
     def open(self, project_dir: str) -> Brain:
+        """A board Thoth may use: one it made on this computer, or one the user said yes to (approvals.py)."""
+        root = find_brain_root(project_dir)
+        if root is not None:
+            approvals.require_board(self.data_dir, root)  # before anything reads or changes it
         brain = Brain.open(project_dir)
         self._sweep_orphans(brain)
         return brain
+
+    def _adopt(self, brain: Brain) -> None:
+        """Use a board Thoth hasn't used here before, now that the user said yes on a card. Thoth keeps its plan,
+        decisions and history and nothing else: everything else that came in .thoth (task folders, logs, previews,
+        anything) moves to .thoth/arrived-<time>/ untouched; tasks lose the folders, branches, commits and sessions
+        the board names and start over; autopilot is off; open runs are marked lost (their processes were never this
+        computer's); and its setup and run commands still wait for the user's approval."""
+        if approvals.identity(brain.root) is None:
+            raise BrainError(f"Thoth won't use the board in {brain.root.name}: its .thoth folder or database is a link.")
+        aside = brain.dir / f"arrived-{time.strftime('%Y%m%d-%H%M%S')}"
+        for entry in sorted(brain.dir.iterdir()):
+            if entry.name not in ("brain.db", "brain.db-wal", "brain.db-shm") and not entry.name.startswith("arrived-"):
+                aside.mkdir(exist_ok=True)
+                os.rename(entry, aside / entry.name)
+        brain.runs_dir.mkdir(exist_ok=True)
+        brain.worktrees_dir.mkdir(exist_ok=True)
+        gitops.git(brain.root, "worktree", "prune", check=False)  # forget task folders git knew at the old places
+        brain.keep_only_the_plan(gitops.current_branch(brain.root))
+        approvals.new_id(brain)
+        approvals.trust(self.data_dir, brain.root)
+        brain.event(self.actor, "adopted", "You chose to use this board, which Thoth hadn't used on this computer before"
+                    + (f"; what else came with it is in .thoth/{aside.name}" if aside.exists() else ""))
 
     def _sweep_orphans(self, brain: Brain) -> None:
         for run in brain.runs(open_only=True):
@@ -549,6 +609,8 @@ class Thoth:
         if task["worktree"] and Path(task["worktree"]).exists():
             return task
         meta = brain.meta()
+        setup = (meta.get("setup") or "").strip()
+        approvals.require(self.data_dir, brain.root, "setup", setup)  # before anything is made
         base_ref = meta.get("base_branch") or "HEAD"
         unmerged = []
         for dep_id in task["depends_on"]:
@@ -586,15 +648,15 @@ class Thoth:
             dep = brain.task(dep_id)
             if dep["worktree"] and Path(dep["worktree"]).is_dir():
                 sources.append((dep["ref"], Path(dep["worktree"])))
-        notes += self._prepare_environment(brain, worktree, sources)
+        notes += self._prepare_environment(brain, worktree, sources, setup=setup)
         if notes:
             brain.add_note(kind="handoff", author="thoth", body=" ".join(notes), task_id=task["id"])
         return brain.update_task(task["id"], branch=branch, worktree=str(worktree), base_ref=base_ref, base_commit=base_commit, head_commit=base_commit)
 
-    def _prepare_environment(self, brain: Brain, worktree: Path, sources: list[tuple[str, Path]] | None = None) -> list[str]:
+    def _prepare_environment(self, brain: Brain, worktree: Path, sources: list[tuple[str, Path]] | None = None, setup: str = "") -> list[str]:
         """Give a new worktree what a clean checkout lacks: copies of what the project keeps out of git, then the
-        project's setup command or links to its dependency folders. Agents have no network to install them.
-        Never .env files or other secrets."""
+        project's setup command (the one checked against the user's approval) or links to its dependency folders.
+        Agents have no network to install them. Never .env files or other secrets."""
         notes: list[str] = []
         if self.settings.get("copy_kept_out_files", True):
             try:
@@ -605,8 +667,8 @@ class Thoth:
                 line = ""
             if line:
                 notes.append(line)
-        setup = (brain.meta().get("setup") or "").strip()
         if setup:
+            approvals.require(self.data_dir, brain.root, "setup", setup)
             started = time.time()
             try:
                 proc = subprocess.run(setup, shell=True, cwd=str(worktree), env=clean_env(self.settings.get("env_passthrough") or ()),
@@ -629,6 +691,8 @@ class Thoth:
         if self.settings.get("attach_mcp") and self.mcp_launcher is not None:
             try:
                 mcp = self.mcp_launcher(brain.root, driver.name, run_id, task["id"])
+                if mcp is not None and "--data-dir" not in mcp.args:  # the same records as this process (approvals.py)
+                    mcp = McpSpec(command=mcp.command, args=[*mcp.args, "--data-dir", str(self.data_dir)])
             except Exception:
                 logger.warning("thoth: could not prepare the MCP server for R%s", run_id, exc_info=True)
         title = f"Thoth · {task['ref']} {'review' if kind == 'review' else task['title']}"
@@ -948,6 +1012,7 @@ class Thoth:
 
     def _run_preview(self, brain: Brain, current: dict | None, run: str) -> dict:
         """Start the project's app (its ``run`` command) for a task's newest version, or for main."""
+        approvals.require(self.data_dir, brain.root, "run", run)
         if current is not None and current["status"] != "merged":
             if not current["head_commit"] or current["head_commit"] == current["base_commit"]:
                 raise BrainError(f"{current['ref']} has no version to run yet")
@@ -1086,12 +1151,15 @@ class Thoth:
         brain = self.open(project_dir)
         plan = autopilot.snapshot(brain)
         tasks = {t["ref"]: t for t in brain.tasks()}
+        setup = (brain.meta().get("setup") or "").strip()
+        approvals.require(self.data_dir, brain.root, "setup", setup)  # autopilot runs it for every new task folder
         return {"plan": plan, "scope": [ref for ref in plan["tasks"] if tasks[ref]["status"] != "merged"], "tasks": tasks,
                 "hours": self._autopilot_hours(hours), "reserve": self._autopilot_reserve(), "root": str(brain.root),
-                "base": brain.meta().get("base_branch") or "main"}
+                "base": brain.meta().get("base_branch") or "main", "setup": setup}
 
     def autopilot_start(self, project_dir: str, hours: Any = None, session: str = "") -> dict:
         brain = self.open(project_dir)
+        approvals.require(self.data_dir, brain.root, "setup", (brain.meta().get("setup") or "").strip())
         ap = autopilot.start(brain, hours=self._autopilot_hours(hours), reserve=self._autopilot_reserve(), session=session)
         brain.event(self.actor, "autopilot", f"autopilot runs {', '.join(ap['scope'])} for up to {ap['hours']:g} hours")
         return {"autopilot": "running", "tasks": ap["scope"], "until": time.strftime("%H:%M", time.localtime(ap["until"])),

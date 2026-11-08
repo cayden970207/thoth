@@ -22,10 +22,16 @@ class GitError(BrainError):
     pass
 
 
+# Thoth's own git commands never run hooks or a filesystem monitor: in a task worktree either could be a file an agent
+# wrote inside its sandbox (with a relative core.hooksPath, such as husky's .husky/_), and git would run it outside.
+# Git keeps the user's own environment: commit signing, git-lfs and proxies may need it.
+SAFE_CONFIG = ("-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false")
+
+
 def git(cwd: str | Path, *args: str, check: bool = True, timeout: int = GIT_TIMEOUT) -> str:
     try:
         proc = subprocess.run(
-            ["git", *args],
+            ["git", *SAFE_CONFIG, *args],
             cwd=str(cwd),
             capture_output=True,
             text=True,
@@ -126,10 +132,15 @@ def branch_exists(root: Path, branch: str) -> bool:
 
 
 def create_worktree(root: Path, worktree: Path, branch: str, base_ref: str) -> str:
-    """Create (or reuse) the task worktree. Returns the base commit."""
+    """Create (or reuse) the task worktree. Returns the base commit. A folder is reused only if git lists it as one
+    of this repository's worktrees: one that merely looks like a checkout could point git at another repository."""
     base_commit = head(root, base_ref)
     if worktree.exists() and (worktree / ".git").exists():
-        return base_commit
+        listed = {line[len("worktree "):] for line in git(root, "worktree", "list", "--porcelain", check=False).splitlines()
+                  if line.startswith("worktree ")}
+        if str(worktree.resolve()) in {str(Path(p).resolve()) for p in listed}:
+            return base_commit
+        raise GitError(f"{worktree} looks like a task folder, but this repository doesn't know it. Move it away, then try again.")
     worktree.parent.mkdir(parents=True, exist_ok=True)
     if branch_exists(root, branch):
         git(root, "worktree", "add", str(worktree), branch)
@@ -275,7 +286,7 @@ def log_oneline(path: str | Path, base: str, tip: str = "HEAD", limit: int = 20)
 
 def is_ancestor(path: str | Path, commit: str, tip: str = "HEAD") -> bool:
     proc = subprocess.run(
-        ["git", "merge-base", "--is-ancestor", commit, tip],
+        ["git", *SAFE_CONFIG, "merge-base", "--is-ancestor", commit, tip],
         cwd=str(path), capture_output=True, text=True, timeout=GIT_TIMEOUT, stdin=subprocess.DEVNULL,
     )
     return proc.returncode == 0
@@ -302,7 +313,7 @@ def restore_tree(worktree: Path, commit: str, message: str) -> str | None:
 def merge_into_worktree(worktree: Path, branch: str, message: str) -> tuple[bool, str]:
     """Bring ``branch`` into a task worktree (e.g. a dependency's newer version). Aborts on conflict."""
     proc = subprocess.run(
-        ["git", "-c", "user.name=Thoth", "-c", "user.email=thoth@localhost", "merge", "--no-ff", "--no-edit", "-m", message, branch],
+        ["git", *SAFE_CONFIG, "-c", "user.name=Thoth", "-c", "user.email=thoth@localhost", "merge", "--no-ff", "--no-edit", "-m", message, branch],
         cwd=str(worktree), capture_output=True, text=True, timeout=GIT_TIMEOUT, stdin=subprocess.DEVNULL,
     )
     if proc.returncode == 0:
@@ -319,7 +330,7 @@ def merge_branch(root: Path, branch: str, message: str) -> tuple[bool, str]:
     checkout is never left half-merged.
     """
     proc = subprocess.run(
-        ["git", "-c", "user.name=Thoth", "-c", "user.email=thoth@localhost", "merge", "--no-ff", "-m", message, branch],
+        ["git", *SAFE_CONFIG, "-c", "user.name=Thoth", "-c", "user.email=thoth@localhost", "merge", "--no-ff", "-m", message, branch],
         cwd=str(root),
         capture_output=True,
         text=True,

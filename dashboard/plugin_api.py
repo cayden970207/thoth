@@ -239,7 +239,9 @@ async def thumb(project: str = "", task: str = "", path: str = "", commit: str =
     if commit:
         if not re.fullmatch(r"[0-9a-fA-F]{7,40}", commit):
             raise HTTPException(400, "Bad commit id")
-        proc = subprocess.run(["git", "show", f"{commit}:{rel.as_posix()}"], cwd=str(root), capture_output=True, timeout=20, stdin=subprocess.DEVNULL)
+        gitops = importlib.import_module(_core().__name__ + ".gitops")
+        proc = subprocess.run(["git", *gitops.SAFE_CONFIG, "show", f"{commit}:{rel.as_posix()}"], cwd=str(root), capture_output=True, timeout=20,
+                              stdin=subprocess.DEVNULL)
         if proc.returncode != 0 or not proc.stdout:
             raise HTTPException(404, "Not in that version")
         if len(proc.stdout) > _MAX_THUMB_BYTES:
@@ -309,7 +311,7 @@ async def media(project: str = "", task: str = "", path: str = "") -> dict[str, 
 def _connect_cmd(agent: str) -> list[str]:
     core = _core()
     dispatch = importlib.import_module(core.__name__ + ".dispatch")
-    return [agent, "mcp", "add", "thoth", "--", sys.executable, "-I", str(dispatch.mcp_server_path()), "--as", agent]
+    return [agent, "mcp", "add", "thoth", "--", sys.executable, "-I", str(dispatch.mcp_server_path()), "--as", agent, "--data-dir", str(_data_dir())]
 
 
 def _cli_env() -> dict:

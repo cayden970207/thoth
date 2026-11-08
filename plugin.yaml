@@ -1,5 +1,5 @@
 name: thoth
-version: 0.9.0
+version: 0.9.1
 manifest_version: 2
 api_version: 1
 description: >-
@@ -149,7 +149,7 @@ config_schema:
     type: list
     default: []
     label: Environment variables to pass to agents
-    description: Thoth strips API keys, tokens and Hermes variables from the agents' environment; list names to keep.
+    description: Agents and project commands get only PATH, HOME, USER, SHELL, TMPDIR, TERM, LANG, the LC_ locale settings, CODEX_HOME and CLAUDE_CONFIG_DIR. List any other names they need, such as a proxy or a certificate file.
   autopilot_hours:
     type: int
     default: 8

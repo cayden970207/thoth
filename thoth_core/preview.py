@@ -150,6 +150,8 @@ import tarfile  # noqa: E402
 import io  # noqa: E402
 import time  # noqa: E402
 
+from .gitops import SAFE_CONFIG  # noqa: E402
+
 MAX_APPS = 4
 _apps: dict[str, tuple[subprocess.Popen, int, str]] = {}
 
@@ -191,13 +193,20 @@ def run_app(repo: Path, commit: str, command: str, key: str, env: dict[str, str]
             _stop(_apps.pop(oldest)[0])
     folder = previews_dir / f"{re.sub(r'[^A-Za-z0-9_-]+', '-', key)}-{commit[:10]}"
     if not folder.exists():
-        data = subprocess.run(["git", "archive", commit], cwd=str(repo), capture_output=True, timeout=120, stdin=subprocess.DEVNULL).stdout
+        data = subprocess.run(["git", *SAFE_CONFIG, "archive", commit], cwd=str(repo), capture_output=True, timeout=120,
+                              stdin=subprocess.DEVNULL).stdout
         if not data:
             raise RuntimeError(f"Could not export {commit[:7]} to run it")
         tmp = folder.with_name(folder.name + ".tmp")
         shutil.rmtree(tmp, ignore_errors=True)
         tmp.mkdir(parents=True)
         tarfile.open(fileobj=io.BytesIO(data)).extractall(tmp, filter="data")
+        for own in (".thoth-run.pid", ".thoth-run.log"):  # Thoth's own files, never ones that came with the work
+            path = tmp / own
+            if path.is_dir() and not path.is_symlink():
+                shutil.rmtree(path)
+            else:
+                path.unlink(missing_ok=True)
         tmp.rename(folder)
         for rel in links:  # dependency folders the main checkout already has (node_modules, .venv)
             src, dst = (link_from / rel) if link_from else None, folder / rel

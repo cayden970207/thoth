@@ -18,7 +18,9 @@ from __future__ import annotations
 
 import json
 import os
+import secrets
 import sqlite3
+import subprocess
 import time
 from contextlib import contextmanager
 from pathlib import Path
@@ -167,6 +169,63 @@ def find_brain_root(start: str | os.PathLike) -> Path | None:
     return None
 
 
+_TRACKED: dict[str, tuple[tuple[int, int, int], bool]] = {}  # project folder -> (its git index's stamp, answer)
+
+
+def _git_index(folder: Path) -> Path | None:
+    """The index git keeps for this checkout (also when .git is a file pointing elsewhere)."""
+    dotgit = folder / ".git"
+    if dotgit.is_dir():
+        return dotgit / "index"
+    try:
+        line = dotgit.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    if not line.startswith("gitdir:"):
+        return None
+    gitdir = Path(line[len("gitdir:"):].strip())
+    return (gitdir if gitdir.is_absolute() else folder / gitdir) / "index"
+
+
+def committed(root: str | os.PathLike) -> bool:
+    """Whether the project's ``.thoth`` folder is in git, in any letter case. Then its board, and the commands stored
+    in it, may have come with someone else's repository, so Thoth won't use it. The answer is kept until git's index
+    changes."""
+    from .gitops import SAFE_CONFIG  # gitops imports this module
+
+    folder = Path(root)
+    index = _git_index(folder)
+    try:
+        st = index.stat() if index is not None else None
+        stamp: tuple[int, int, int] | None = (st.st_ino, st.st_mtime_ns, st.st_size) if st else None
+    except OSError:
+        stamp = None
+    known = _TRACKED.get(str(folder))
+    if stamp is not None and known is not None and known[0] == stamp:
+        return known[1]
+    try:
+        proc = subprocess.run(["git", *SAFE_CONFIG, "ls-files", "-z", "--", f":(icase){BRAIN_DIRNAME}"], cwd=str(folder),
+                              capture_output=True, timeout=60, stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise BrainError(f"Thoth could not ask git about {folder}: {exc}") from exc
+    if proc.returncode != 0:
+        why = proc.stderr.decode(errors="replace").strip()
+        if "not a git repository" in why:  # nothing can be in git where there is none
+            return False
+        raise BrainError(f"git can't read {folder.name}: {why[:300]}")
+    found = bool(proc.stdout.strip(b"\0"))
+    if stamp is not None:
+        _TRACKED[str(folder)] = (stamp, found)
+    return found
+
+
+def committed_message(root: str | os.PathLike) -> str:
+    return (f"{Path(root).name}'s .thoth folder is committed to git, so its board and the commands stored in it may "
+            "have come from someone else, and Thoth won't use it. If you trust it, take it out of git with "
+            "`git rm -r --cached .thoth` and commit (the files stay, and Thoth asks you before running any command "
+            "stored there). Otherwise delete the .thoth folder and start the project again.")
+
+
 class Brain:
     def __init__(self, project_dir: str | os.PathLike):
         self.root = Path(project_dir).expanduser().resolve()
@@ -192,6 +251,7 @@ class Brain:
                 ("coordinator", "hermes"),
                 ("created_at", str(now)),
                 ("schema", "1"),
+                ("board_id", secrets.token_hex(16)),  # with the folder, how this computer knows its boards (approvals.py)
             ):
                 db.execute("INSERT OR IGNORE INTO meta(key, value) VALUES (?, ?)", (key, value))
             if goal:
@@ -206,6 +266,8 @@ class Brain:
             raise BrainError(
                 f"No Thoth brain found at or above {project_dir}. Run thoth_init in the project first."
             )
+        if committed(root):
+            raise BrainError(committed_message(root))
         brain = cls(root)
         brain._ensure_schema()
         return brain
@@ -274,11 +336,36 @@ class Brain:
             row = db.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
         if row is None:
             raise BrainError(f"Task {tid(task_id)} does not exist")
-        return _task_dict(row)
+        return self._placed(_task_dict(row))
 
     def tasks(self) -> list[dict]:
         with self._conn() as db:
-            return [_task_dict(r) for r in db.execute("SELECT * FROM tasks ORDER BY id")]
+            return [self._placed(_task_dict(r)) for r in db.execute("SELECT * FROM tasks ORDER BY id")]
+
+    def _placed(self, task: dict) -> dict:
+        """A task's folder only where Thoth makes it, .thoth/worktrees/<ref> (never through a link): any other path
+        stored in the board is dropped, so a board can't point an agent or a git command at another folder."""
+        stored = task.get("worktree") or ""
+        if stored:
+            expected = self.worktrees_dir / task["ref"]
+            if Path(stored) != expected or expected.is_symlink() or self.worktrees_dir.is_symlink() or self.dir.is_symlink():
+                task["worktree"] = ""
+        return task
+
+    def keep_only_the_plan(self, base_branch: str) -> None:
+        """For a board from elsewhere that the user chose to use: keep its plan, decisions and history, and drop all
+        it says about folders, branches, commits, processes and sessions on the computer it came from."""
+        now = time.time()
+        with self._tx() as db:
+            db.execute(f"UPDATE runs SET status='lost', error='it came with the board', ended_at=? "
+                       f"WHERE status IN ({', '.join('?' for _ in OPEN_RUN_STATUSES)})", (now, *OPEN_RUN_STATUSES))
+            db.execute("UPDATE runs SET session_id='', pid=NULL, owner_pid=NULL")
+            db.execute("UPDATE tasks SET worktree='', branch='', base_ref='', base_commit='', head_commit='', updated_at=? "
+                       "WHERE status != 'merged'", (now,))
+            db.execute("UPDATE tasks SET status='todo' WHERE status NOT IN ('merged', 'cancelled')")
+            db.execute("UPDATE tasks SET worktree='' WHERE status = 'merged'")
+            for key, value in (("base_branch", base_branch), ("autopilot", ""), ("pending_approval", "")):
+                db.execute("INSERT INTO meta(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, value))
 
     def update_task(self, task_id: int, **fields: Any) -> dict:
         if not fields:

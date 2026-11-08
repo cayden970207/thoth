@@ -30,13 +30,14 @@ TOOLS: dict[str, tuple[str, dict]] = {
     "thoth_init": (
         "Start or reopen the shared brain for a project (board, decisions, history in .thoth/). For a new project pass "
         "create=true and a short folder name as project: Thoth makes it in the user's projects folder (~/Thoth by "
-        "default). A folder of theirs: its full path; Thoth keeps versions there itself.",
+        "default). A folder of theirs: its full path; Thoth keeps versions there itself. A board Thoth hasn't used on this "
+        "computer before needs the user's yes.",
         _obj({
             "project": {"type": "string", "description": "A short folder name or a full path; other tools default to the chat's folder"},
             "goal": {"type": "string", "description": "What the team builds"},
             "create": {"type": "boolean"},
-            "run": {"type": "string", "description": "Command that starts the app for previews, with {port}. Needs the user's approval"},
-            "setup": {"type": "string", "description": "Command run in each new task folder before an agent starts, e.g. npm ci. Needs the user's approval"},
+            "run": {"type": "string", "description": "One-line command that starts the app for previews, with {port}. Runs only after the user approves it for this folder"},
+            "setup": {"type": "string", "description": "One-line command run in each new task folder before an agent starts, e.g. npm ci. Runs only after the user approves it for this folder"},
         }),
     ),
     "thoth_plan": (
@@ -108,7 +109,7 @@ TOOLS: dict[str, tuple[str, dict]] = {
     "thoth_sync": ("Bring the newest versions of a task's dependencies into it.", _obj({"task": _TASK}, ["task"])),
     "thoth_preview": (
         "Show the user what a task built (page, game, app) or, without a task, everything merged: returns a localhost link. "
-        "Never start servers or open browsers yourself.",
+        "When the project has a run command, the user approves starting the app. Never start servers or open browsers yourself.",
         _obj({"task": {"type": "string", "description": "Omit for everything merged"}}),
     ),
     "thoth_models": ("Models and efforts Claude Code and Codex can use here.", _obj({})),

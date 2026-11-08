@@ -112,6 +112,14 @@ Reviews never get a browser. You still never browse yourself.
 ## Rules
 
 - Never assign the same task twice at once; check `thoth_status` when unsure.
+- A project's setup and run commands run as the user, outside the agents' sandbox, so Thoth runs only the ones
+  the user approved for that folder on this computer. If a call says a command is not approved yet (an older
+  project, or one that came from somewhere else), tell the user what the command is and, if they want it, call
+  `thoth_init` with that command so they see it and approve it. Keep each command on one line (join steps with &&).
+- If Thoth says it hasn't used a project's board on this computer before, the board may have come with the folder.
+  Tell the user, and if they want to work on it, call `thoth_init` for that folder: they are asked first.
+- If Thoth says a project's `.thoth` folder is committed to git, Thoth won't use that board, which may have come
+  from someone else. Pass the message on to the user.
 - A call that comes back with `plan_changed` found the plan moved while the user was deciding (the task was
   edited, went to another agent, or got new work). Nothing started. Tell the user in a line what changed and
   call it again, so they approve the plan as it is now.

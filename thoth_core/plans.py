@@ -47,8 +47,9 @@ def default_data_dir() -> Path:
         from plugins.plugin_storage import plugin_data_dir
 
         return Path(plugin_data_dir("thoth"))
-    except Exception:
-        return Path.home() / ".hermes" / "plugin-data" / "thoth"
+    except Exception:  # outside Hermes (an MCP server started without --data-dir): where Hermes keeps it
+        home = os.environ.get("HERMES_HOME")
+        return (Path(home).expanduser() if home else Path.home() / ".hermes") / "plugin-data" / "thoth"
 
 
 def _int(value: Any) -> int | None:

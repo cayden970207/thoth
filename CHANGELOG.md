@@ -6,6 +6,20 @@ Every version of Thoth, newest first, in plain words. Hermes tells you when an u
 <!-- One section per version: "## X.Y.Z — YYYY-MM-DD", then "- " lines written for the person using Thoth.
      The page shows the first three, so lead with what they will notice. See docs/releasing.md. -->
 
+## 0.9.1 — 2026-11-08
+
+- A project's setup and run commands run only once you have approved them on this computer. A project that
+  already has one asks you once more; Hermes shows you the command first.
+- Thoth uses a project's board only if it made it on this computer, or you said yes to it once. A board that came
+  with a folder (a clone, a download or a copy) waits for that, and nothing in it starts on its own. Your projects
+  from earlier versions carry on as before.
+- Starting an app for a preview now asks you first, and the card shows the command that will run.
+- Agents and project commands now get only the basics from your environment (where programs are, your home
+  folder, your language), so other keys and tokens never reach them. Add any others they need under
+  **Environment variables to pass to agents** in Settings → Plugins → Thoth.
+- Thoth won't use a project whose `.thoth` folder is committed to git, and its own git commands (commits and
+  merges of the agents' work) no longer run git hooks.
+
 ## 0.9.0 — 2026-11-08
 
 - **New project** in the project menu: say what to build, and Hermes sets it up in a new chat.

@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any
 
 from .thoth_core import __version__
+from .thoth_core import approvals
 from .thoth_core import autopilot
 from .thoth_core import browser as web
 from .thoth_core import changelog
@@ -32,7 +33,7 @@ from .thoth_core import folders
 from .thoth_core import plans
 from .thoth_core import projects as registry
 from .thoth_core.agents import driver_for
-from .thoth_core.brain import Brain, BrainError, find_brain_root, parse_id, tid
+from .thoth_core.brain import Brain, BrainError, committed, committed_message, find_brain_root, parse_id, tid
 from .thoth_core.briefing import board_lines
 from .thoth_core.dispatch import call, coordinator_howto, mcp_server_path
 from .thoth_core.schemas import EMOJI, TOOLS
@@ -235,19 +236,34 @@ class ThothPlugin:
     def _approval_text(self, name: str, args: dict, svc: Thoth, project: str) -> tuple[str, str]:
         """What the approval card says: first what will happen, in plain words; the technical details last."""
         if name == "thoth_init":
-            setup = " ".join(str(args.get("setup") or "").split())
-            run = " ".join(str(args.get("run") or "").split())
+            # Exactly what will be stored and run (one line, nothing hidden), so the card shows what runs.
+            setup, run = (approvals.clean(k, args[k]) if args.get(k) is not None else "" for k in ("setup", "run"))
+            home = svc.board_home(project, bool(args.get("create"))) if project else None
+            if home is not None and (home / ".thoth").exists() and committed(home):
+                raise BrainError(committed_message(home))
+            foreign = self._foreign_board(project, bool(args.get("create")))
             where = folders.tilde(Path(project).expanduser())
             lines = []
+            if foreign is not None:
+                lines.append(f"Use the Thoth board in {foreign.name}, which Thoth hasn't used on this computer before? It may "
+                             "have come with the folder (a clone, a download or a copy). Nothing in it starts on its own: "
+                             "autopilot stays off, and its setup and run commands wait for your OK.")
             if setup:
-                lines.append(f"Before an agent starts on a task, Thoth will run `{setup}` in that task's folder.")
+                lines.append(f"Before an agent starts on a task, Thoth will run {approvals.code(setup)} in that task's folder.")
             if run:
-                lines.append(f"To preview the app, Thoth will start it with `{run}` in a copy of the version you open.")
-            lines.append("These run as you, outside the agents' sandbox and with network access.")
+                lines.append(f"To preview the app, Thoth will start it with {approvals.code(run)} in a copy of the version you open.")
+            if setup or run:
+                lines.append("These run as you, outside the agents' sandbox and with network access. Thoth runs only the "
+                             "commands you approve here, for this project.")
             lines.append(f"Details: project {where}.")
-            return "\n".join(lines), f"thoth:setup:{_short_hash(where + setup + '|' + run)}"
+            seen = where + chr(0) + setup + chr(0) + run
+            if foreign is not None:  # an "always allow" for it could only ever cover this one board
+                return "\n".join(lines), f"thoth:adopt:{_short_hash(seen + chr(0) + (approvals.identity(foreign) or ''))}"
+            return "\n".join(lines), f"thoth:setup:{_short_hash(seen)}"
         if name == "thoth_autopilot":
             return self._plan_card(svc, project, args)
+        if name == "thoth_preview":
+            return self._preview_card(svc, project, args)
         brain = svc.open(project)
         task = brain.task(parse_id(args.get("task"), "T"))
         what = f"{task['ref']} “{task['title']}”"
@@ -290,6 +306,11 @@ class ThothPlugin:
         browse = ""
         if kind == "build":
             lines.append(f"It can only change this task's own copy of the project, and stops after {minutes} minutes at most.")
+            setup = (brain.meta().get("setup") or "").strip()
+            if setup and not (task["worktree"] and Path(task["worktree"]).exists()):  # it runs when the task's folder is made
+                approvals.require(svc.data_dir, brain.root, "setup", setup)
+                lines.append(f"First Thoth runs the setup command you approved, {approvals.code(setup)}, in that copy: as you, "
+                             "with network access, on the files the task starts from.")
             browse = web.normalize(args["browser"] if args.get("browser") is not None else task.get("browser"))
             if browse:
                 ok, why = web.ready(browse)
@@ -329,12 +350,38 @@ class ThothPlugin:
         lines.append(f"Thoth starts each task once what it builds on is merged, has the other agent review it, sends changes back "
                      f"(up to {rounds} rounds), retries a failed run once, gives a task to the other agent if a plan runs out, and "
                      f"merges what passes review into {card['base']}.")
+        if card.get("setup"):
+            lines.append(f"Before each task starts, Thoth runs the setup command you approved, {approvals.code(card['setup'])}, "
+                         "in its folder: as you, with network access, on the files the task starts from.")
         lines.append(f"It stops and asks you in this chat when an agent is stuck, a review keeps asking for changes, a merge "
                      f"conflicts, the plan changes, or after {hours:g} hours. It keeps {round(card['reserve'] * 100)}% of each "
                      f"plan for you, and keeps your Mac awake while it runs.")
         lines.append(f"Details: up to {int(svc.settings.get('max_concurrent_runs') or 3)} agents at once · your Claude and ChatGPT "
                      f"plans · Claude Code in its OS sandbox, Codex in workspace-write · project {card['root']}.")
-        return "\n".join(lines), f"thoth:autopilot:{_short_hash(autopilot.fingerprint(card['plan']))}"
+        seen = autopilot.fingerprint(card["plan"]) + (chr(0) + card["setup"] if card.get("setup") else "")
+        return "\n".join(lines), f"thoth:autopilot:{_short_hash(seen)}"
+
+    @staticmethod
+    def _preview_card(svc: Thoth, project: str, args: dict) -> tuple[str, str]:
+        """Starting the project's app runs its run command as the user: the card says exactly what runs, on which
+        version. Its rule key covers this command in this project only."""
+        brain = svc.open(project)
+        run = (brain.meta().get("run") or "").strip()
+        if not run:
+            raise BrainError("This project no longer has a command that starts its app. Call thoth_preview again.")
+        approvals.require(svc.data_dir, brain.root, "run", run)
+        ref = args.get("task")
+        task = brain.task(parse_id(ref, "T")) if ref not in (None, "", "main") else None
+        if task is not None and task["status"] != "merged":
+            what = f"{task['ref']} “{task['title']}”"
+        else:
+            what = f"{brain.meta().get('base_branch') or 'main'}, with everything merged so far"
+        text = (f"Start {brain.root.name}'s app to preview {what}.\n"
+                f"Thoth runs the command you approved, {approvals.code(run)}, as you, outside the agents' sandbox and with "
+                f"network access, on a copy of that version's files, which include code the agents wrote. It listens on a "
+                f"free port on this computer and stops when Hermes quits.\n"
+                f"Details: project {brain.root}.")
+        return text, f"thoth:preview:{_short_hash(str(brain.root) + chr(0) + run)}"
 
     def _self_assign(self, name: str, args: dict, svc: Thoth, project: str) -> bool:
         """thoth_assign to hermes starts no process: the coordinator does the work in its own turn."""
@@ -348,14 +395,52 @@ class ThothPlugin:
                 return False
         return agent == "hermes"
 
-    @staticmethod
-    def _gated(name: str, args: dict) -> bool:
-        return (name in GATED or (name == "thoth_init" and bool(str(args.get("setup") or args.get("run") or "").strip()))
-                or (name == "thoth_autopilot" and str(args.get("action") or "").lower() == "start"))
+    def _gated(self, name: str, args: dict, project: str | None = None, scope: str = "") -> bool:
+        """Calls that need the user's OK: starting an agent, merging, setting a command that runs outside the agents'
+        sandbox, running a plan on autopilot, and starting the project's app with its run command."""
+        if name in GATED:
+            return True
+        if name == "thoth_init":
+            if any(args.get(k) is not None and str(args.get(k)).strip() for k in ("setup", "run")):
+                return True
+            return self._foreign_board(self._init_target(args, scope) if project is None else project, bool(args.get("create"))) is not None
+        if name == "thoth_autopilot":
+            return str(args.get("action") or "").lower() == "start"
+        if name == "thoth_preview":
+            run = _stored(self.project_for(args, scope) if project is None else project, "run", self._data_dir())
+            return run is None or bool(run)  # None: Thoth can't tell, so it asks
+        return False
+
+    def _init_target(self, args: dict, scope: str) -> str:
+        try:
+            return self._init_folder(args, self.project_for(args, scope))
+        except BrainError:
+            return ""
+
+    def _foreign_board(self, folder: str, create: bool = False) -> Path | None:
+        """The board thoth_init would use for ``folder`` (found the way thoth_init finds it) when Thoth hasn't used it
+        on this computer (approvals.py), else None. If Thoth can't tell, thoth_init itself refuses such a board."""
+        if not folder:
+            return None
+        try:
+            home = self.service().board_home(folder, create)
+            if not (home / ".thoth" / "brain.db").is_file():
+                return None
+            return None if approvals.trusted(self._data_dir(), home) else home
+        except Exception:
+            return None
+
+    @classmethod
+    def _usable(cls, root: Path) -> bool:
+        """A board Thoth may read and write for the user: one it knows here, and not committed to git."""
+        try:
+            return approvals.trusted(cls._data_dir(), root) and not committed(root)
+        except Exception:
+            return False
 
     def pre_tool_call(self, tool_name: str = "", args: dict | None = None, task_id: str = "", session_id: str = "", **_: Any) -> dict | None:
         args = dict(args or {})
-        if not self._gated(tool_name, args):
+        if not self._gated(tool_name, args, scope=session_id or task_id):
             return None
         svc = self.service()
         project = self.project_for(args, session_id or task_id)
@@ -384,12 +469,19 @@ class ThothPlugin:
         says, who does it, what it builds on and how far each of those got) and, for a review or a merge, the exact
         work. An approval holds only while this stays the same."""
         if name == "thoth_init":
-            return {}
+            try:
+                home = svc.board_home(project, bool(args.get("create"))) if project else None
+            except Exception:
+                home = None
+            board = (approvals.identity(home) or "") if home is not None and (home / ".thoth" / "brain.db").is_file() else ""
+            return {"ref": Path(project).name or "the project", "board": board}
         if name == "thoth_autopilot":
             try:
                 return {"autopilot": autopilot.snapshot(svc.open(project))}
             except Exception:
                 return {}
+        if name == "thoth_preview":
+            return {"ref": Path(project).name or "the project", "run": _stored(project, "run", ThothPlugin._data_dir()) or ""}
         try:
             brain = svc.open(project)
             task = brain.task(parse_id(args.get("task"), "T"))
@@ -401,13 +493,16 @@ class ThothPlugin:
         state = {"ref": task["ref"], "goal": brain.meta().get("goal", ""), "deps": deps, **{k: task.get(k) for k in _PLAN_FIELDS}}
         if name in ("thoth_review", "thoth_merge"):
             state.update(work=task.get("head_commit") or "", status=task.get("status") or "")
+        else:  # a build may run the project's setup command, which its card shows
+            state["setup"] = (brain.meta().get("setup") or "").strip()
         return state
 
     def post_tool_call(self, tool_name: str = "", args: dict | None = None, status: str = "", **_: Any) -> None:
         """A gated call the user rejected (or that was blocked) is no longer waiting for an OK."""
         args = dict(args or {})
-        if status == "blocked" and self._gated(tool_name, args):
-            project = self.project_for(args, str(_.get("session_id") or _.get("task_id") or ""))
+        scope = str(_.get("session_id") or _.get("task_id") or "")
+        if status == "blocked" and self._gated(tool_name, args, scope=scope):
+            project = self.project_for(args, scope)
             self._mark_waiting(project, "", "")
 
     @staticmethod
@@ -415,7 +510,7 @@ class ThothPlugin:
         """Let the Thoth page say that Hermes is waiting for the user's OK (and open that chat)."""
         try:
             root = find_brain_root(project) if project else None
-            if root is not None:
+            if root is not None and ThothPlugin._usable(root):  # never write into a board Thoth doesn't know
                 Brain(root).set_meta("pending_approval", json.dumps({"summary": summary[:220], "session": session, "at": time.time()}) if summary else "")
         except Exception:
             logger.debug("thoth: could not record the pending approval", exc_info=True)
@@ -446,7 +541,8 @@ class ThothPlugin:
             try:
                 if name == "thoth_init":
                     project = self._init_folder(args, project)
-                if self._gated(name, args) and not self._self_assign(name, args, svc, project):
+                approved = False  # the user said yes to this exact call on its card
+                if self._gated(name, args, project) and not self._self_assign(name, args, svc, project):
                     ticket = self._take_ticket(name, args, scope)
                     if ticket is None:
                         return json.dumps({"ok": False, "error": self._gate(name)})
@@ -457,6 +553,7 @@ class ThothPlugin:
                         return json.dumps({"ok": False, "plan_changed": changed, "error": (
                             "BLOCKED: the plan changed while this waited for the user's OK (" + "; ".join(changed) + "). "
                             "Nothing was started. Call it again so the user approves the plan as it is now.")})
+                    approved = True
                 if name == "thoth_wait":
                     result = self._wait(svc, args, project)
                 elif name == "thoth_autopilot":
@@ -466,7 +563,7 @@ class ThothPlugin:
                     if result.get("autopilot") == "running":
                         self._ensure_conductor()
                 else:
-                    result = call(svc, name, {**args, "project": project}, lambda: project)
+                    result = call(svc, name, {**args, "project": project}, lambda: project, approved=approved)
                 self.remember(project)
                 root = find_brain_root(project) if project else None
                 if root is not None and scope:
@@ -590,7 +687,7 @@ class ThothPlugin:
                 for project in self._known_projects():
                     try:
                         root = find_brain_root(project)
-                        if root is not None and autopilot.load(Brain(root)).get("state") == "running":
+                        if root is not None and self._usable(root) and autopilot.load(Brain(root)).get("state") == "running":
                             live.append(str(root))
                     except Exception:
                         continue
@@ -640,6 +737,12 @@ class ThothPlugin:
         if root is None:
             return None
         try:
+            if not approvals.trusted(self._data_dir(), root):  # none of a board Thoth doesn't know reaches the model
+                return {"context": f"[Thoth] {root} has a Thoth board that Thoth hasn't used on this computer before, so "
+                                   "Thoth won't use it yet. If the user wants to work on it, call thoth_init for that folder: "
+                                   "the user is asked first."}
+            if committed(root):
+                return None
             brain = Brain(root)
             meta = brain.meta()
             tasks = brain.tasks()
@@ -766,6 +869,9 @@ _CHANGE_WORDS = {
     "depends_on": "what {ref} builds on changed",
     "work": "{ref} has new work since the user was asked",
     "status": "{ref}'s review status changed",
+    "setup": "the project's setup command changed",
+    "run": "the project's run command changed",
+    "board": "the project's board changed",
 }
 
 
@@ -810,8 +916,23 @@ def _keep_awake() -> Any:
         return None
 
 
+def _stored(project: str, kind: str, data_dir: Path) -> str | None:
+    """The project's stored setup or run command: "" when there is none, None when Thoth can't tell (a board it
+    doesn't know, or one it can't read). A caller treats None as a command that would run."""
+    root = find_brain_root(project) if project else None
+    if root is None:
+        return ""
+    try:
+        if not approvals.trusted(data_dir, root):
+            return None
+        return (Brain(root).meta().get(kind) or "").strip()
+    except Exception:
+        return None
+
+
 def _fingerprint(name: str, args: dict) -> str:
-    relevant = {k: args.get(k) for k in ("project", "task", "agent", "reviewer", "instructions", "override", "feedback", "files", "model", "effort", "action", "hours")}
+    relevant = {k: args.get(k) for k in ("project", "task", "agent", "reviewer", "instructions", "override", "feedback", "files", "model", "effort", "action", "hours",
+                                         "setup", "run", "create", "browser")}
     blob = json.dumps([name, relevant], sort_keys=True, default=str)
     return hashlib.sha256(blob.encode()).hexdigest()
 

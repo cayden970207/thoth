@@ -11,7 +11,7 @@ Two modes:
   every Thoth tool, so that tool can plan, assign, review and merge exactly like
   Hermes does. Which tool may do what is decided by its own permission prompts.
 
-Usage: mcp_server.py [--project DIR] [--as claude|codex|hermes] [--run R] [--task T]
+Usage: mcp_server.py [--project DIR] [--as claude|codex|hermes] [--run R] [--task T] [--data-dir DIR]
 """
 
 from __future__ import annotations
@@ -60,7 +60,7 @@ class Server:
         self.worker = bool(args.run)
         self.run_ref = args.run or ""
         self.task_ref = args.task or ""
-        self.svc = Thoth(actor=self.actor)
+        self.svc = Thoth(actor=self.actor, data_dir=args.data_dir or None)  # Hermes's records of what the user approved
         self.names = WORKER_TOOLS if self.worker else tuple(n for n in TOOLS if n not in HERMES_ONLY)
         self.inflight: list[threading.Thread] = []
 
@@ -135,6 +135,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--as", dest="as_agent", default="claude", choices=["claude", "codex", "hermes"])
     parser.add_argument("--run", default="")
     parser.add_argument("--task", default="")
+    parser.add_argument("--data-dir", dest="data_dir", default="")
     args = parser.parse_args(argv)
     logging.basicConfig(stream=sys.stderr, level=logging.WARNING, format="thoth-mcp %(levelname)s %(message)s")
     server = Server(args)

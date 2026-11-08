@@ -1416,6 +1416,7 @@ function ThothPage () {
   const [overview, setOverviewState] = useState(() => (typeof innerHeight === 'number' ? innerHeight >= 860 : true))
   const setOverview = v => { setOverviewState(v); try { ctxRef.storage.set('overview', v ? 'show' : 'hide') } catch (e) {} }
   const selRef = useRef('')
+  const page = useRef(null)
   const aside = useRef(null)
   useEffect(() => { if (aside.current) aside.current.scrollTop = 0 }, [tab, selected])
   const seg = useRef(null)
@@ -1433,7 +1434,7 @@ function ThothPage () {
       if (e.key === 'Escape') { setOpen(false); setConfirm(''); setKeys(false); if (store.viewer) { store.viewer = null; emit() } return }
       if (e.metaKey || e.ctrlKey || e.altKey) return
       if (e.key === '?') { setKeys(k => !k); return }
-      if (e.key === '/') { const el = document.querySelector('.th-cmd-input'); if (el) { e.preventDefault(); el.focus() } return }
+      if (e.key === '/') { const el = page.current && page.current.querySelector('.th-cmd-input'); if (el) { e.preventDefault(); el.focus() } return }
       if (!store.snap) return
       if (e.key === '1') switchView('canvas')
       else if (e.key === '2') switchView('board')
@@ -1474,7 +1475,7 @@ function ThothPage () {
   const coord = snap.meta.coordinator || 'hermes'
   const project = s.projects.find(p => p.path === s.project) || { name: snap.project.split('/').pop() }
   const nextCoord = { hermes: 'claude', claude: 'codex', codex: 'hermes' }[coord]
-  return h('div', { className: 'th-root' }, css,
+  return h('div', { className: 'th-root', ref: page }, css,
     h('header', { className: 'th-topbar' },
       h('div', { className: 'th-crumbs' }, 'Thoth', h(VersionTag, { where: 'page' }), h('span', null, '/'),
         s.projects.length ? h(ProjectSwitcher, { s, current: project, where: 'page' }) : h('b', null, project.name),
@@ -2209,8 +2210,8 @@ function usePopover () {
 
 async function copyText (text) {
   try {
-    if (ctxRef.os && ctxRef.os.clipboard && ctxRef.os.clipboard.writeText) await ctxRef.os.clipboard.writeText(text)
-    else await navigator.clipboard.writeText(text)
+    if (ctxRef.os && ctxRef.os.writeClipboard && await ctxRef.os.writeClipboard(text)) return true
+    await navigator.clipboard.writeText(text)  // older Hermes Desktop builds without ctx.os.writeClipboard
     return true
   } catch (e) { return false }
 }
